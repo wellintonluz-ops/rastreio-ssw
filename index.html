@@ -6,6 +6,7 @@
 <title>Rastreio de Entregas SSW — Grupo TBX</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <style>
@@ -59,8 +60,8 @@
     <section class="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-center gap-2">
       <button id="btnAdicionar" class="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-medium">+ Adicionar NFs</button>
       <label class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 cursor-pointer font-medium">
-        📄 Importar Excel/CSV
-        <input type="file" id="inputArquivo" accept=".xlsx,.xls,.csv" class="hidden">
+        📄 Importar XML / ZIP / Excel
+        <input type="file" id="inputArquivo" accept=".xml,.zip,.xlsx,.xls,.csv" multiple class="hidden">
       </label>
       <div class="w-px h-8 bg-slate-200 mx-1"></div>
       <button id="btnAtualizarPend" class="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium">⟳ Atualizar não entregues</button>
@@ -89,6 +90,7 @@
           </select>
         </label>
         <label class="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" id="filtroPend"> Só com pendência</label>
+        <label class="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" id="filtroAtraso"> Só atrasadas</label>
         <span id="contagem" class="text-sm text-slate-500"></span>
       </div>
       <div class="overflow-x-auto scroll-thin">
@@ -101,6 +103,7 @@
               <th class="text-left px-3 py-2 sortable" data-sort="status">Status</th>
               <th class="text-left px-3 py-2">Última ocorrência</th>
               <th class="text-left px-3 py-2 sortable" data-sort="ultData">Data</th>
+              <th class="text-left px-3 py-2 sortable" data-sort="prevISO" title="Previsão de entrega (SSW ou dPrevEntrega do XML)">Previsão</th>
               <th class="text-left px-3 py-2">Local</th>
               <th class="text-left px-3 py-2 sortable" data-sort="ultPendData" title="Última ocorrência de problema (ausente, recusa, endereço, avaria…), mesmo que já tenha sido resolvida">Última pendência</th>
               <th class="text-right px-3 py-2 sortable" data-sort="diasParado" title="Dias desde a última ocorrência">Parado</th>
@@ -135,6 +138,7 @@
         <li><b>Chave da NF-e</b> (44 dígitos) — funciona mesmo sem senha</li>
         <li><b>NF + CPF do destinatário</b> separados por <code>;</code> ou tab — ex.: <code>130516;02602602655</code></li>
         <li><b>Pedido</b> — prefixe com <code>P:</code> — ex.: <code>P:A2341232B</code></li>
+        <li>Ou use <b>📄 Importar XML / ZIP / Excel</b> — também dá para <b>arrastar os arquivos</b> para a página</li>
       </ul>
       <textarea id="txtNFs" rows="10" class="w-full border border-slate-300 rounded-lg p-3 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="130516&#10;130517;02602602655&#10;43160400850257000132550010000083991000083990"></textarea>
       <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="chkConsultarAgora" checked> Consultar logo após adicionar</label>
@@ -318,7 +322,7 @@ function adicionarItens(lista) {
     if (!k) continue;
     const ex = existentes.get(k) || (cand.nf && existentes.get('NF' + cand.nf));
     if (ex) {
-      for (const c of ['chave', 'pedido', 'cpf', 'cliente', 'cidadeDestino']) if (cand[c] && !ex[c]) ex[c] = cand[c];
+      for (const c of ['chave', 'pedido', 'cpf', 'docDest', 'cliente', 'cidadeDestino', 'previsao', 'emissao', 'transportadora', 'valor']) if (cand[c] && !ex[c]) ex[c] = cand[c];
       atualizados++; ids.push(ex.id);
     } else {
       itens.push(cand); existentes.set(k, cand); novos++; ids.push(cand.id);
@@ -365,32 +369,106 @@ function mapearColunas(cabecalho) {
   return m;
 }
 
-document.getElementById('inputArquivo').onchange = async (ev) => {
-  const f = ev.target.files[0]; ev.target.value = '';
-  if (!f) return;
-  try {
-    const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const linhas = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-    let iCab = linhas.findIndex((l) => { const m = mapearColunas(l); return m.nf != null || m.chave != null || m.pedido != null; });
-    if (iCab < 0) { toast('Não encontrei coluna de NF, Chave ou Pedido na planilha.'); return; }
-    const m = mapearColunas(linhas[iCab]);
-    const lista = [];
-    for (const l of linhas.slice(iCab + 1)) {
-      const d = {};
-      if (m.chave != null) { const c = soDig(l[m.chave]); if (c.length === 44) d.chave = c; }
-      if (m.nf != null) { const n = soDig(l[m.nf]); if (n) d.nf = String(Number(n)); }
-      if (m.pedido != null && String(l[m.pedido]).trim()) d.pedido = String(l[m.pedido]).trim();
-      if (m.cpf != null) { const c = soDig(l[m.cpf]); if (c.length === 11) d.cpf = c; }
-      if (m.cliente != null) d.cliente = String(l[m.cliente]).trim();
-      if (m.cidade != null) d.cidadeDestino = String(l[m.cidade]).trim() + (m.uf != null && l[m.uf] ? ' / ' + l[m.uf] : '');
-      if (d.nf || d.chave || d.pedido) lista.push(d);
+/* --- Leitura de XML de NF-e (avulso, vários ou dentro de ZIP) --- */
+function lerXmlNFe(texto) {
+  const doc = new DOMParser().parseFromString(texto, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) return null;
+  const inf = doc.getElementsByTagName('infNFe')[0];
+  if (!inf) return null; // ex.: XML de evento/cancelamento
+  const t = (el, tag) => { const e = el && el.getElementsByTagName(tag)[0]; return e ? e.textContent.trim() : ''; };
+  const ide = inf.getElementsByTagName('ide')[0];
+  const dest = inf.getElementsByTagName('dest')[0];
+  const ender = dest && dest.getElementsByTagName('enderDest')[0];
+  const transp = inf.getElementsByTagName('transporta')[0];
+  const chave = soDig(t(doc, 'chNFe') || (inf.getAttribute('Id') || ''));
+  if (chave.length !== 44) return null;
+  if (t(ide, 'tpNF') === '0') return { entrada: true };
+  const cpf = soDig(t(dest, 'CPF'));
+  const cnpj = soDig(t(dest, 'CNPJ'));
+  const prev = t(ide, 'dPrevEntrega');
+  return {
+    chave,
+    nf: String(Number(t(ide, 'nNF')) || nfDaChave(chave)),
+    pedido: t(inf.getElementsByTagName('compra')[0], 'xPed') || t(inf, 'xPed'),
+    cpf: cpf.length === 11 ? cpf : '',
+    docDest: cpf || cnpj,
+    cliente: t(dest, 'xNome'),
+    cidadeDestino: ender ? [t(ender, 'xMun'), t(ender, 'UF')].filter(Boolean).join(' / ') : '',
+    previsao: prev,
+    emissao: (t(ide, 'dhEmi') || t(ide, 'dEmi')).slice(0, 19),
+    transportadora: t(transp, 'xNome'),
+    valor: t(inf.getElementsByTagName('ICMSTot')[0], 'vNF'),
+  };
+}
+
+async function lerArquivosXml(arquivos) {
+  const lista = []; let lidos = 0, ignorados = 0;
+  const processar = (txt) => { lidos++; const d = lerXmlNFe(txt); if (d && !d.entrada) lista.push(d); else ignorados++; };
+  for (const f of arquivos) {
+    const nome = f.name.toLowerCase();
+    if (nome.endsWith('.xml')) processar(await f.text());
+    else if (nome.endsWith('.zip')) {
+      const zip = await JSZip.loadAsync(await f.arrayBuffer());
+      const entradas = Object.values(zip.files).filter((z) => !z.dir);
+      for (const z of entradas) {
+        const n = z.name.toLowerCase();
+        if (n.endsWith('.xml')) processar(await z.async('string'));
+        else if (n.endsWith('.zip')) { // zip dentro de zip
+          const sub = await JSZip.loadAsync(await z.async('arraybuffer'));
+          for (const s2 of Object.values(sub.files)) if (!s2.dir && s2.name.toLowerCase().endsWith('.xml')) processar(await s2.async('string'));
+        }
+      }
     }
-    if (!lista.length) { toast('Nenhuma NF encontrada na planilha.'); return; }
+  }
+  return { lista, lidos, ignorados };
+}
+
+async function lerPlanilha(f) {
+  const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const linhas = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+  const iCab = linhas.findIndex((l) => { const m = mapearColunas(l); return m.nf != null || m.chave != null || m.pedido != null; });
+  if (iCab < 0) throw new Error(`Não encontrei coluna de NF, Chave ou Pedido em "${f.name}".`);
+  const m = mapearColunas(linhas[iCab]);
+  const lista = [];
+  for (const l of linhas.slice(iCab + 1)) {
+    const d = {};
+    if (m.chave != null) { const c = soDig(l[m.chave]); if (c.length === 44) d.chave = c; }
+    if (m.nf != null) { const n = soDig(l[m.nf]); if (n) d.nf = String(Number(n)); }
+    if (m.pedido != null && String(l[m.pedido]).trim()) d.pedido = String(l[m.pedido]).trim();
+    if (m.cpf != null) { const c = soDig(l[m.cpf]); if (c.length === 11) d.cpf = c; }
+    if (m.cliente != null) d.cliente = String(l[m.cliente]).trim();
+    if (m.cidade != null) d.cidadeDestino = String(l[m.cidade]).trim() + (m.uf != null && l[m.uf] ? ' / ' + l[m.uf] : '');
+    if (d.nf || d.chave || d.pedido) lista.push(d);
+  }
+  return lista;
+}
+
+async function importarArquivos(arquivos) {
+  arquivos = [...arquivos];
+  if (!arquivos.length) return;
+  try {
+    const xmlZip = arquivos.filter((f) => /\.(xml|zip)$/i.test(f.name));
+    const planilhas = arquivos.filter((f) => /\.(xlsx|xls|csv)$/i.test(f.name));
+    let lista = [], msg = [];
+    if (xmlZip.length) {
+      toast('Lendo XMLs…');
+      const r = await lerArquivosXml(xmlZip);
+      lista = lista.concat(r.lista);
+      msg.push(`${r.lista.length} NF-e lida(s) de ${r.lidos} XML(s)` + (r.ignorados ? ` (${r.ignorados} ignorado(s): eventos, entradas ou inválidos)` : ''));
+    }
+    for (const f of planilhas) { const l = await lerPlanilha(f); lista = lista.concat(l); msg.push(`${l.length} linha(s) de ${f.name}`); }
+    if (!lista.length) { toast('Nenhuma NF encontrada nos arquivos.'); return; }
     const ids = adicionarItens(lista);
-    if (confirm(`${lista.length} linha(s) lida(s). Consultar agora na SSW?`)) consultar(ids);
+    if (confirm(msg.join('\n') + '\n\nConsultar agora na SSW?')) consultar(ids);
   } catch (e) { toast('Erro ao ler arquivo: ' + e.message); }
-};
+}
+
+document.getElementById('inputArquivo').onchange = (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; importarArquivos(fs); };
+// arrastar e soltar arquivos em qualquer lugar da página
+document.addEventListener('dragover', (e) => { if (usuario) { e.preventDefault(); document.body.classList.add('ring-4', 'ring-blue-400', 'ring-inset'); } });
+document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('ring-4', 'ring-blue-400', 'ring-inset'); });
+document.addEventListener('drop', (e) => { if (!usuario) return; e.preventDefault(); document.body.classList.remove('ring-4', 'ring-blue-400', 'ring-inset'); importarArquivos(e.dataTransfer.files); });
 
 /* ===================== CONSULTA ===================== */
 async function consultar(ids) {
@@ -453,7 +531,7 @@ function aplicarResultado(r) {
   if (!it.cliente && p.cabecalho.destinatario) it.cliente = p.cabecalho.destinatario;
   if (!it.pedido && p.cabecalho.pedido) it.pedido = p.cabecalho.pedido;
   if (!it.nf && p.cabecalho.nro_nf) it.nf = String(p.cabecalho.nro_nf);
-  it.previsao = p.cabecalho.previsao || '';
+  it.previsaoSSW = p.cabecalho.previsao || '';
   const ult = p.eventos[p.eventos.length - 1];
   it.ultOcorrencia = ult ? ult.ocorrencia : '';
   it.ultDescricao = ult ? ult.descricao : '';
@@ -546,7 +624,17 @@ const diasDesde = (iso) => { if (!iso) return null; const d = new Date(iso); ret
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const badge = (st) => { const s = STATUS[st] || STATUS.pendente; return `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap ${s.cor}"><span class="w-1.5 h-1.5 rounded-full ${s.dot}"></span>${s.label}</span>`; };
 
+const fmtDia = (iso) => { if (!iso) return ''; const [a, m, d] = iso.slice(0, 10).split('-'); return d && m && a ? `${d}/${m}/${a}` : iso; };
 function calcularDerivados(it) {
+  const prev = paraISO(it.previsaoSSW || it.previsao || '');
+  it.prevISO = /^\d{4}-\d{2}-\d{2}/.test(prev) ? prev.slice(0, 10) : '';
+  it.atraso = null;
+  if (it.prevISO) {
+    const limite = new Date(it.prevISO + 'T23:59:59');
+    const ref = it.status === 'entregue' && it.ultData ? new Date(it.ultData) : new Date();
+    const dias = Math.floor((ref - limite) / 86400000) + 1;
+    it.atraso = ref > limite ? Math.max(1, dias) : 0;
+  }
   it.diasParado = it.status === 'entregue' ? null : diasDesde(it.ultData);
   const fim = it.status === 'entregue' && it.ultData ? new Date(it.ultData) : new Date();
   it.diasTotal = it.primData ? Math.max(0, Math.floor((fim - new Date(it.primData)) / 86400000)) : null;
@@ -578,6 +666,7 @@ function render() {
   const q = norm(document.getElementById('busca').value);
   const parado = Number(document.getElementById('filtroParado').value);
   const soPend = document.getElementById('filtroPend').checked;
+  const soAtraso = document.getElementById('filtroAtraso').checked;
   let lista = itens.filter((i) => {
     if (filtroStatus) {
       const grupo = { ocorrencia: ['ocorrencia', 'devolucao'], nao_localizado: ['nao_localizado', 'erro'] }[filtroStatus] || [filtroStatus];
@@ -585,7 +674,8 @@ function render() {
     }
     if (parado && !(i.diasParado != null && i.diasParado > parado)) return false;
     if (soPend && !i.ultPendencia) return false;
-    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, i.chave].join(' ')).includes(q)) return false;
+    if (soAtraso && !(i.atraso > 0)) return false;
+    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, i.transportadora, i.chave].join(' ')).includes(q)) return false;
     return true;
   });
   const { campo, dir } = ordenacao;
@@ -608,6 +698,7 @@ function render() {
       <td class="px-3 py-2">${badge(i.status)}</td>
       <td class="px-3 py-2 max-w-[320px]"><div class="truncate" title="${esc(i.ultOcorrencia || i.mensagem)}">${esc(i.ultOcorrencia || i.mensagem || '')}</div>${i.ultDescricao ? `<div class="text-xs text-slate-400 truncate" title="${esc(i.ultDescricao)}">${esc(i.ultDescricao)}</div>` : ''}</td>
       <td class="px-3 py-2 whitespace-nowrap text-slate-600">${fmtData(i.ultData)}</td>
+      <td class="px-3 py-2 whitespace-nowrap">${i.prevISO ? `<div class="${i.atraso > 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmtDia(i.prevISO)}</div>${i.atraso > 0 ? `<div class="text-xs text-red-500">${i.status === 'entregue' ? 'entregue com ' : ''}${i.atraso}d de atraso</div>` : ''}` : ''}</td>
       <td class="px-3 py-2 max-w-[180px] truncate text-slate-600" title="${esc(i.ultLocal)}">${esc(i.ultLocal)}</td>
       <td class="px-3 py-2 max-w-[260px]">${i.ultPendencia ? `<div class="truncate ${['ocorrencia', 'devolucao'].includes(i.status) ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-xs text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + ' pendências' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
       <td class="px-3 py-2 text-right ${alerta}">${i.diasParado != null ? i.diasParado + 'd' : ''}</td>
@@ -641,6 +732,7 @@ document.querySelectorAll('th.sortable').forEach((th) => th.onclick = () => {
 document.getElementById('busca').oninput = render;
 document.getElementById('filtroParado').onchange = render;
 document.getElementById('filtroPend').onchange = render;
+document.getElementById('filtroAtraso').onchange = render;
 
 /* ===================== DETALHE ===================== */
 function abrirDetalhe(id) {
@@ -651,7 +743,8 @@ function abrirDetalhe(id) {
   document.getElementById('detStatus').innerHTML = badge(it.status);
   const info = [
     ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], ['CPF', it.cpf ? it.cpf.replace(/(\d{3})\d{6}(\d{2})/, '$1.***.***-$2') : ''],
-    ['Remetente', it.cabecalho?.remetente], ['Previsão', it.previsao], ['Recebedor', it.recebedor],
+    ['Transportadora (NF)', it.transportadora], ['Emissão', fmtData(it.emissao)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
+    ['Remetente', it.cabecalho?.remetente], ['Previsão', it.prevISO ? fmtDia(it.prevISO) + (it.atraso > 0 ? ` (${it.atraso}d de atraso)` : '') : ''], ['Recebedor', it.recebedor],
     ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
     ['Dias em trânsito', it.diasTotal != null ? it.diasTotal + ' dia(s)' : ''], ['Consultado em', fmtData(it.consultadoEm)], ['Fonte', it.fonte],
   ].filter(([, v]) => v);
@@ -708,7 +801,7 @@ document.getElementById('btnExportar').onclick = () => {
     'Status': (STATUS[i.status] || {}).label, 'Última ocorrência': i.ultOcorrencia || i.mensagem || '', 'Descrição': i.ultDescricao || '',
     'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal,
     'Última pendência': i.ultPendencia || '', 'Descrição pendência': i.ultPendDescricao || '', 'Data última pendência': fmtData(i.ultPendData), 'Local pendência': i.ultPendLocal || '', 'Qtd. pendências': i.qtdPendencias || 0, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
-    'Previsão': i.previsao || '', 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
+    'Transportadora (NF)': i.transportadora || '', 'Emissão': fmtData(i.emissao), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
   }));
   const ws = XLSX.utils.json_to_sheet(linhas);
   ws['!cols'] = Object.keys(linhas[0]).map((k) => ({ wch: Math.min(45, Math.max(10, k.length + 2, ...linhas.map((l) => String(l[k] ?? '').length))) }));
