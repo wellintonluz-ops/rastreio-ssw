@@ -47,6 +47,7 @@
       </div>
       <div class="ml-auto flex items-center gap-2 text-sm">
         <span id="statusWorker" class="px-2 py-1 rounded bg-slate-800 text-slate-300 text-xs">Worker: verificando…</span>
+        <span id="statusSync" class="px-2 py-1 rounded bg-slate-800 text-slate-300 text-xs cursor-pointer">Ocorrências SSW: —</span>
         <button id="btnConfig" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700">⚙️ Configurações</button>
         <span id="userEmail" class="text-slate-300 hidden md:inline"></span>
         <button id="btnSair" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700">Sair</button>
@@ -246,8 +247,12 @@ auth.onAuthStateChanged(async (u) => {
     document.getElementById('telaLogin').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     document.getElementById('userEmail').textContent = u.email;
+    itens.forEach((i) => { if (!i.eventosApi && i.eventos) recalcular(i); });
     render();
     verificarWorker();
+    sincronizarOcorrencias();
+    clearInterval(window.__syncT); window.__syncT = setInterval(() => sincronizarOcorrencias(), 120000);
+    document.getElementById('statusSync').onclick = () => sincronizarOcorrencias(false);
   } else {
     if (u) { await auth.signOut(); document.getElementById('msgLogin').textContent = 'Use um e-mail @' + DOMINIO_PERMITIDO; }
     usuario = null;
@@ -516,36 +521,114 @@ function aplicarResultado(r) {
   it.fonte = r.fonte || '';
   it.tentativas = r.tentativas || [];
   if (!r.ok) {
-    const msg = r.mensagem || 'Não localizado';
-    it.status = /nenhum|nao localiz|não localiz|not found/i.test(msg) ? 'nao_localizado' : 'erro';
-    it.mensagem = msg;
-    it.eventos = it.eventos || [];
+    it.erroApi = r.mensagem || 'Não localizado';
+    recalcular(it);
     return;
   }
+  it.erroApi = '';
   const p = interpretarSSW(r.resposta);
   it.resposta = r.resposta;
-  it.eventos = p.eventos;
+  it.eventosApi = p.eventos;
   it.cabecalho = p.cabecalho;
   if (!it.cliente && p.cabecalho.destinatario) it.cliente = p.cabecalho.destinatario;
   if (!it.pedido && p.cabecalho.pedido) it.pedido = p.cabecalho.pedido;
   if (!it.nf && p.cabecalho.nro_nf) it.nf = String(p.cabecalho.nro_nf);
   it.previsaoSSW = p.cabecalho.previsao || '';
-  const ult = p.eventos[p.eventos.length - 1];
+  if (!p.eventos.length && !(it.ocorrenciasWS || []).length) it.erroApi = (r.resposta && r.resposta.message) || 'Sem ocorrências';
+  recalcular(it);
+}
+
+/* --- Junta rastreio (API) + ocorrências recebidas do SSW (webservice SSW2181) e recalcula o item --- */
+function codigoDoTexto(t) { const m = String(t || '').match(/\((\d{1,3})\)\s*$/) || String(t || '').match(/^(\d{1,3})\s*-\s/); return m ? String(Number(m[1])) : ''; }
+function eventoWS(o) {
+  return {
+    dataISO: o.data_evento || '', codigo: String(Number(o.codigo) || o.codigo || ''),
+    ocorrencia: (o.codigo ? o.codigo + ' - ' : '') + (o.descricao || ''),
+    descricao: o.complemento || '', tipo: '', local: '',
+    recebedor: [o.recebedor, o.doc_recebedor].filter(Boolean).join(' — '),
+    agendamento: o.agendamento || '', link: o.link_comprovante || '', fonte: 'ssw',
+  };
+}
+function recalcular(it) {
+  if (!it.eventosApi && it.eventos && !it.ocorrenciasWS) it.eventosApi = it.eventos; // dados antigos
+  const ws = (it.ocorrenciasWS || []).map(eventoWS);
+  const chaveEv = (e) => (e.codigo || codigoDoTexto(e.ocorrencia)) + '|' + (e.dataISO || '').slice(0, 16);
+  const vistosWS = new Set(ws.map(chaveEv));
+  const api = (it.eventosApi || []).filter((e) => !vistosWS.has(chaveEv(e)));
+  const eventos = api.concat(ws).sort((a, b) => (a.dataISO || '').localeCompare(b.dataISO || ''));
+  it.eventos = eventos;
+  const ult = eventos[eventos.length - 1];
   it.ultOcorrencia = ult ? ult.ocorrencia : '';
   it.ultDescricao = ult ? ult.descricao : '';
   it.ultData = ult ? ult.dataISO : '';
   it.ultLocal = ult ? ult.local : '';
-  it.recebedor = ult ? ult.recebedor : '';
-  it.primData = p.eventos[0] ? p.eventos[0].dataISO : '';
-  it.status = ult ? classificar(ult) : 'nao_localizado';
-  const pends = p.eventos.filter(ehPendencia);
+  const comRecebedor = [...eventos].reverse().find((e) => e.recebedor);
+  it.recebedor = comRecebedor ? comRecebedor.recebedor : '';
+  const comLink = [...eventos].reverse().find((e) => e.link);
+  it.linkComprovante = comLink ? comLink.link : '';
+  const comAgenda = [...eventos].reverse().find((e) => e.agendamento);
+  it.agendamento = comAgenda ? comAgenda.agendamento : '';
+  it.primData = eventos[0] ? eventos[0].dataISO : '';
+  const pends = eventos.filter(ehPendencia);
   const up = pends[pends.length - 1];
   it.qtdPendencias = pends.length;
   it.ultPendencia = up ? up.ocorrencia : '';
   it.ultPendDescricao = up ? up.descricao : '';
   it.ultPendData = up ? up.dataISO : '';
   it.ultPendLocal = up ? up.local : '';
-  it.mensagem = ult ? '' : (r.resposta && r.resposta.message) || 'Sem ocorrências';
+  it.qtdWS = ws.length;
+  if (ult) { it.status = classificar(ult); it.mensagem = ''; }
+  else if (it.erroApi) { it.status = /nenhum|nao localiz|não localiz|not found/i.test(it.erroApi) ? 'nao_localizado' : 'erro'; it.mensagem = it.erroApi; }
+}
+
+/* --- Sincronização com as ocorrências recebidas pelo Worker --- */
+const LS_ULT_OC = 'rastreioSSW.v1.ultimoIdOcorrencia';
+let sincronizando = false, ultimaSync = null;
+async function sincronizarOcorrencias(silencioso = true) {
+  if (sincronizando || !usuario) return;
+  sincronizando = true;
+  let aposId = 0; try { aposId = Number(localStorage.getItem(LS_ULT_OC)) || 0; } catch {}
+  let novas = 0, nfsNovas = 0;
+  try {
+    for (let volta = 0; volta < 20; volta++) {
+      const j = await chamarWorker('/ocorrencias?apos_id=' + aposId + '&limite=2000');
+      const porChave = new Map(), porNF = new Map();
+      for (const i of itens) { if (i.chave) porChave.set(i.chave, i); if (i.nf) porNF.set(String(i.nf), i); }
+      const tocados = new Set();
+      for (const o of j.ocorrencias || []) {
+        let it = (o.chave && porChave.get(o.chave)) || porNF.get(String(o.nf));
+        if (!it) {
+          it = novoItem({ nf: o.nf ? String(o.nf) : '', chave: o.chave || '', pedido: o.pedido || '', origem: 'ssw' });
+          itens.push(it); nfsNovas++;
+          if (it.chave) porChave.set(it.chave, it); if (it.nf) porNF.set(String(it.nf), it);
+        }
+        if (!it.chave && o.chave) it.chave = o.chave;
+        if (!it.pedido && o.pedido) it.pedido = o.pedido;
+        if (!it.cnpjTransp && o.cnpj_transp) it.cnpjTransp = o.cnpj_transp;
+        it.ocorrenciasWS = (it.ocorrenciasWS || []).filter((x) => x.id !== o.id && !(x.data_evento === o.data_evento && x.codigo === o.codigo));
+        it.ocorrenciasWS.push(o);
+        tocados.add(it); novas++;
+      }
+      tocados.forEach(recalcular);
+      aposId = j.ultimo_id || aposId;
+      try { localStorage.setItem(LS_ULT_OC, String(aposId)); } catch {}
+      if (!j.mais) break;
+    }
+    ultimaSync = new Date();
+    if (novas) { salvar(); render(); if (detalheId) abrirDetalhe(detalheId); }
+    atualizarStatusSync();
+    if (!silencioso || novas) toast(novas ? `${novas} ocorrência(s) nova(s) do SSW` + (nfsNovas ? `, ${nfsNovas} NF(s) adicionada(s)` : '') : 'Nenhuma ocorrência nova do SSW.');
+  } catch (e) {
+    atualizarStatusSync(e.message);
+    if (!silencioso) toast('Erro ao buscar ocorrências: ' + e.message);
+  } finally { sincronizando = false; }
+}
+function atualizarStatusSync(erro) {
+  const el = document.getElementById('statusSync'); if (!el) return;
+  if (erro) { el.textContent = 'Ocorrências SSW: erro'; el.title = erro; el.className = 'px-2 py-1 rounded text-xs bg-red-500/20 text-red-300 cursor-pointer'; return; }
+  el.textContent = 'Ocorrências SSW: ' + (ultimaSync ? ultimaSync.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '—');
+  el.title = 'Ocorrências recebidas das transportadoras (webservice SSW2181). Atualiza a cada 2 minutos. Clique para atualizar agora.';
+  el.className = 'px-2 py-1 rounded text-xs bg-slate-800 text-slate-300 cursor-pointer hover:bg-slate-700';
 }
 
 /* --- Interpretação tolerante da resposta SSW --- */
@@ -737,7 +820,7 @@ function abrirDetalhe(id) {
   document.getElementById('detStatus').innerHTML = badge(it.status);
   const info = [
     ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], ['CPF', it.cpf ? it.cpf.replace(/(\d{3})\d{6}(\d{2})/, '$1.***.***-$2') : ''],
-    ['Transportadora (NF)', it.transportadora], ['Emissão', fmtData(it.emissao)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
+    ['Transportadora (NF)', it.transportadora || (it.cnpjTransp ? 'CNPJ ' + it.cnpjTransp : '')], ['Agendamento', it.agendamento ? fmtData(it.agendamento) : ''], ['Emissão', fmtData(it.emissao)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
     ['Remetente', it.cabecalho?.remetente], ['Previsão', it.prevISO ? fmtDia(it.prevISO) + (it.atraso > 0 ? ` (${it.atraso}d de atraso)` : '') : ''], ['Recebedor', it.recebedor],
     ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
     ['Dias em trânsito', it.diasTotal != null ? it.diasTotal + ' dia(s)' : ''], ['Consultado em', fmtData(it.consultadoEm)], ['Fonte', it.fonte],
@@ -749,10 +832,12 @@ function abrirDetalhe(id) {
     const st = STATUS[classificar(e)];
     return `<li class="ml-5">
       <span class="absolute -left-[7px] mt-1 tl-dot ${idx === 0 ? st.dot : 'bg-slate-300'} ring-4 ring-white"></span>
-      <div class="text-xs text-slate-500">${fmtData(e.dataISO)}${e.local ? ' · ' + esc(e.local) : ''}</div>
+      <div class="text-xs text-slate-500">${fmtData(e.dataISO)}${e.local ? ' · ' + esc(e.local) : ''}${e.fonte === 'ssw' ? ' <span class="ml-1 text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded" title="Recebida direto do SSW da transportadora (webservice SSW2181)">SSW</span>' : ''}</div>
       <div class="font-medium ${ehPendencia(e) ? 'text-amber-700' : idx === 0 ? '' : 'text-slate-600'}">${esc(e.ocorrencia)}${ehPendencia(e) ? ' <span class="ml-1 text-[10px] uppercase bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">pendência</span>' : ''}</div>
       ${e.descricao ? `<div class="text-sm text-slate-500">${esc(e.descricao)}</div>` : ''}
       ${e.recebedor ? `<div class="text-xs text-slate-500 mt-0.5">Recebedor: ${esc(e.recebedor)}</div>` : ''}
+      ${e.agendamento ? `<div class="text-xs text-slate-500 mt-0.5">Agendado para: ${fmtData(e.agendamento)}</div>` : ''}
+      ${e.link ? `<a href="${esc(e.link)}" target="_blank" rel="noopener" class="text-xs text-blue-600 hover:underline mt-0.5 inline-block">📄 Ver comprovante de entrega</a>` : ''}
     </li>`;
   }).join('') : `<li class="ml-5 text-sm text-slate-500">${esc(it.mensagem || 'Ainda não consultada.')}</li>`;
   document.getElementById('detRaw').textContent = JSON.stringify({ tentativas: it.tentativas, resposta: it.resposta }, null, 2);
@@ -794,7 +879,7 @@ document.getElementById('btnExportar').onclick = () => {
     'NF': i.nf, 'Pedido': i.pedido, 'Chave NF-e': i.chave, 'Cliente': i.cliente, 'Destino': i.cidadeDestino,
     'Status': (STATUS[i.status] || {}).label, 'Última pendência': i.ultPendencia || '', 'Descrição pendência': i.ultPendDescricao || '', 'Data última pendência': fmtData(i.ultPendData), 'Local pendência': i.ultPendLocal || '', 'Qtd. pendências': i.qtdPendencias || 0, 'Última ocorrência': i.ultOcorrencia || i.mensagem || '', 'Descrição': i.ultDescricao || '',
     'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
-    'Transportadora (NF)': i.transportadora || '', 'Emissão': fmtData(i.emissao), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
+    'Transportadora (NF)': i.transportadora || '', 'Emissão': fmtData(i.emissao), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Agendamento': i.agendamento ? fmtData(i.agendamento) : '', 'Comprovante': i.linkComprovante || '', 'Ocorrências recebidas do SSW': i.qtdWS || 0, 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
   }));
   const ws = XLSX.utils.json_to_sheet(linhas);
   ws['!cols'] = Object.keys(linhas[0]).map((k) => ({ wch: Math.min(45, Math.max(10, k.length + 2, ...linhas.map((l) => String(l[k] ?? '').length))) }));

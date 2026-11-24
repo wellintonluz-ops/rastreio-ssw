@@ -20,6 +20,11 @@
  * Rotas:
  *   GET  /status            -> diz quais configurações existem (sem mostrar valores)
  *   POST /rastrear          -> { itens: [{ id, nf, chave, pedido, cpf }] }  (máx. 12 por chamada)
+ *   POST /ssw/ocorrencias/<token>  -> recebe as ocorrências enviadas pelo SSW das
+ *                             transportadoras (EDI SSW2181). Sem login; protegido pelo token da URL.
+ *   GET  /ocorrencias?apos_id=N&limite=2000 -> ocorrências recebidas (para o painel, com login)
+ *
+ * Banco: Cloudflare D1, vinculado ao Worker com o nome DB (tabela "ocorrencias").
  *
  * Ordem de tentativa para cada item:
  *   1. chave_nfe  -> /api/trackingdanfe   (pública, não precisa senha)
@@ -28,6 +33,8 @@
  */
 
 const SSW = 'https://ssw.inf.br/api/';
+// SHA-256 do token da URL do webservice (o token em si não fica no código)
+const WEBHOOK_TOKEN_SHA256 = '0706284c04bf4e5db7adb47eca8718e5ab1fc504fd7ce719fce19be5ea01fdf7';
 const MAX_ITENS = 12; // plano grátis: 50 sub-requisições por chamada
 
 export default {
@@ -36,6 +43,12 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
     const url = new URL(request.url);
+
+    // Recebimento das ocorrências enviadas pelo SSW (sem login do Firebase)
+    if (url.pathname.startsWith('/ssw/ocorrencias/')) {
+      return receberOcorrenciasSSW(request, env, url.pathname.split('/')[3] || '');
+    }
+
     try {
       const user = await autenticar(request, env);
 
@@ -60,6 +73,16 @@ export default {
         if (!itens.length) return json({ ok: false, erro: 'Envie { itens: [...] }' }, 400, cors);
         const resultados = await poolMap(itens, 4, (it) => rastrearItem(it, env));
         return json({ ok: true, resultados }, 200, cors);
+      }
+
+      if (url.pathname === '/ocorrencias' && request.method === 'GET') {
+        if (!env.DB) return json({ ok: false, erro: 'Banco D1 (DB) não vinculado ao Worker.' }, 500, cors);
+        const aposId = Math.max(0, Number(url.searchParams.get('apos_id')) || 0);
+        const limite = Math.min(5000, Math.max(1, Number(url.searchParams.get('limite')) || 2000));
+        const { results } = await env.DB.prepare(
+          'SELECT id, recebido_em, cnpj_transp, cnpj_pagador, nf, serie, chave, pedido, cte_numero, cte_chave, data_evento, codigo, descricao, complemento, recebedor, doc_recebedor, latitude, longitude, agendamento, link_comprovante, tem_imagem FROM ocorrencias WHERE id > ? ORDER BY id LIMIT ?'
+        ).bind(aposId, limite).all();
+        return json({ ok: true, ocorrencias: results, ultimo_id: results.length ? results[results.length - 1].id : aposId, mais: results.length === limite }, 200, cors);
       }
 
       return json({ ok: false, erro: 'Rota não encontrada' }, 404, cors);
@@ -138,6 +161,74 @@ async function chamarSSW(rota, body) {
   } catch (e) {
     return { status: 0, json: { success: false, message: 'Falha ao acessar SSW: ' + e.message } };
   }
+}
+
+/* ------------- Webservice de ocorrências (SSW2181) -------------- */
+
+async function receberOcorrenciasSSW(request, env, token) {
+  const agora = new Date();
+  const dataHora = fmtSSW(agora);
+  const resposta = (codigo, descricao, nf, pedido, protocolo) =>
+    new Response(JSON.stringify([{ retorno: { codigo, descricao, numeroNFe: nf || 0, pedido: pedido || '', dataHora, protocolo: protocolo || '' } }]),
+      { status: codigo, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' } });
+
+  if (request.method !== 'POST') return resposta(405, 'METODO NAO PERMITIDO');
+  if (!token || (await sha256(token)) !== WEBHOOK_TOKEN_SHA256) return resposta(401, 'TOKEN INVALIDO');
+  if (!env.DB) return resposta(500, 'BANCO NAO CONFIGURADO');
+
+  let corpo;
+  try { corpo = JSON.parse(await request.text()); } catch { return resposta(400, 'JSON INVALIDO'); }
+  const lista = Array.isArray(corpo) ? corpo : [corpo];
+  let ultimoProtocolo = '', nfResp = 0, pedidoResp = '', gravadas = 0;
+  try {
+    for (const o of lista) {
+      const nf = o.nf || {}, cte = o.cte || {}, oc = o.ocorrencia || {};
+      if (!oc.codigo && !oc.descricao) continue;
+      nfResp = Number(nf.numeroNFe) || 0; pedidoResp = nf.pedido || '';
+      const r = await env.DB.prepare(
+        `INSERT INTO ocorrencias (recebido_em, cnpj_transp, cnpj_pagador, nf, serie, chave, pedido, cte_numero, cte_chave,
+          data_evento, codigo, descricao, complemento, recebedor, doc_recebedor, latitude, longitude, agendamento, link_comprovante, tem_imagem)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(chave_nf, data_evento, codigo) DO UPDATE SET complemento = excluded.complemento, recebedor = excluded.recebedor,
+           doc_recebedor = excluded.doc_recebedor, link_comprovante = excluded.link_comprovante, tem_imagem = excluded.tem_imagem
+         RETURNING id`
+      ).bind(
+        agora.toISOString(), soDigitos(o.cnpjTransportadora), soDigitos(o.cnpjPagador),
+        nfResp, String(nf.serieNFe || ''), soDigitos(nf.chaveNFe), pedidoResp,
+        Number(cte.numeroSSW || cte.numeroCTe) || null, soDigitos(cte.chaveSSW || cte.chaveCTe),
+        isoSSW(oc.dataHoraEvento), String(oc.codigo ?? ''), String(oc.descricao || ''), String(oc.complemento || ''),
+        String(oc.nomeRecebedor || ''), soDigitos(oc.docRecebedor), String(oc.latitude ?? ''), String(oc.longitude ?? ''),
+        isoSSW(oc.dataHoraAgendamento), decodeLink(oc.linkComprovante), oc.imagemComprovante ? 1 : 0
+      ).first();
+      ultimoProtocolo = String(r && r.id ? r.id : '');
+      gravadas++;
+    }
+  } catch (e) {
+    return resposta(500, 'ERRO AO GRAVAR: ' + String(e.message || e).slice(0, 120), nfResp, pedidoResp);
+  }
+  if (!gravadas) return resposta(400, 'NENHUMA OCORRENCIA NO CORPO DA REQUISICAO');
+  return resposta(200, 'OCORRENCIA PROCESSADA COM SUCESSO', nfResp, pedidoResp, ultimoProtocolo || 'OK');
+}
+
+// "13-06-2019 16:59:39" ou "13/06/2019 16:59" -> "2019-06-13T16:59:39"
+function isoSSW(v) {
+  if (!v) return '';
+  const s = String(v).trim();
+  let m = s.match(/^(\d{2})[-\/](\d{2})[-\/](\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}T${m[4] || '00'}:${m[5] || '00'}:${m[6] || '00'}`;
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}T${m[4] || '00'}:${m[5] || '00'}:${m[6] || '00'}`;
+  return s;
+}
+function fmtSSW(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  const br = new Date(d.getTime() - 3 * 3600 * 1000);
+  return `${p(br.getUTCDate())}-${p(br.getUTCMonth() + 1)}-${br.getUTCFullYear()} ${p(br.getUTCHours())}:${p(br.getUTCMinutes())}:${p(br.getUTCSeconds())}`;
+}
+function decodeLink(v) { if (!v) return ''; try { return decodeURIComponent(String(v)).replace(/&amp;/g, '&'); } catch { return String(v); } }
+async function sha256(t) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t));
+  return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /* ------------------------ Autenticação ------------------------- */
