@@ -113,6 +113,7 @@
           </thead>
           <tbody id="tbody"></tbody>
         </table>
+        <div id="paginacao" class="hidden flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-slate-100"></div>
         <div id="vazio" class="hidden text-center text-slate-400 py-16">
           <div class="text-4xl mb-2">📦</div>
           Nenhuma NF na lista. Clique em <b>+ Adicionar NFs</b> ou importe uma planilha.
@@ -229,6 +230,8 @@ const STATUS = {
 /* ===================== ESTADO ===================== */
 let itens = carregar();
 let filtroStatus = '';
+const POR_PAGINA = 50;
+let pagina = 1;
 let ordenacao = { campo: 'status', dir: 1 };
 let usuario = null;
 let detalheId = null;
@@ -753,7 +756,7 @@ function render() {
       <div class="text-2xl font-semibold ${c}">${v}</div>
       ${k && itens.length ? `<div class="text-xs text-slate-400">${Math.round((v / itens.length) * 100)}%</div>` : '<div class="text-xs text-transparent">.</div>'}
     </button>`).join('');
-  document.querySelectorAll('[data-kpi]').forEach((b) => b.onclick = () => { filtroStatus = filtroStatus === b.dataset.kpi ? '' : b.dataset.kpi; render(); });
+  document.querySelectorAll('[data-kpi]').forEach((b) => b.onclick = () => { filtroStatus = filtroStatus === b.dataset.kpi ? '' : b.dataset.kpi; pagina = 1; render(); });
 
   // Filtro
   const q = norm(document.getElementById('busca').value);
@@ -780,7 +783,14 @@ function render() {
     return (va > vb ? 1 : va < vb ? -1 : 0) * dir;
   });
 
-  document.getElementById('contagem').textContent = `${lista.length} de ${itens.length}`;
+  const totalPaginas = Math.max(1, Math.ceil(lista.length / POR_PAGINA));
+  if (pagina > totalPaginas) pagina = totalPaginas;
+  if (pagina < 1) pagina = 1;
+  const ini = (pagina - 1) * POR_PAGINA;
+  const totalFiltrado = lista.length;
+  lista = lista.slice(ini, ini + POR_PAGINA);
+  document.getElementById('contagem').textContent = `${totalFiltrado} de ${itens.length}`;
+  renderPaginacao(totalFiltrado, totalPaginas, ini);
   document.getElementById('vazio').classList.toggle('hidden', itens.length > 0);
   document.getElementById('tbody').innerHTML = lista.map((i) => {
     const alerta = i.diasParado != null && i.diasParado >= 3 ? 'text-red-600 font-semibold' : '';
@@ -816,12 +826,41 @@ document.getElementById('tbody').onclick = (ev) => {
 document.querySelectorAll('th.sortable').forEach((th) => th.onclick = () => {
   const c = th.dataset.sort;
   ordenacao = { campo: c, dir: ordenacao.campo === c ? -ordenacao.dir : 1 };
+  pagina = 1;
   render();
 });
-document.getElementById('busca').oninput = render;
-document.getElementById('filtroParado').onchange = render;
-document.getElementById('filtroPend').onchange = render;
-document.getElementById('filtroAtraso').onchange = render;
+const renderPag1 = () => { pagina = 1; render(); };
+document.getElementById('busca').oninput = renderPag1;
+document.getElementById('filtroParado').onchange = renderPag1;
+document.getElementById('filtroPend').onchange = renderPag1;
+document.getElementById('filtroAtraso').onchange = renderPag1;
+
+function renderPaginacao(total, totalPaginas, ini) {
+  const el = document.getElementById('paginacao');
+  if (total <= POR_PAGINA) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  const fim = Math.min(ini + POR_PAGINA, total);
+  // números de página: primeira, última e vizinhas da atual
+  const nums = new Set([1, totalPaginas, pagina - 2, pagina - 1, pagina, pagina + 1, pagina + 2].filter((n) => n >= 1 && n <= totalPaginas));
+  const ordem = [...nums].sort((a, b) => a - b);
+  let botoes = '', anterior = 0;
+  for (const n of ordem) {
+    if (n - anterior > 1) botoes += '<span class="px-1 text-slate-400">…</span>';
+    botoes += `<button data-pag="${n}" class="min-w-[32px] px-2 py-1 rounded-md text-sm ${n === pagina ? 'bg-blue-600 text-white font-semibold' : 'hover:bg-slate-100 text-slate-600'}">${n}</button>`;
+    anterior = n;
+  }
+  el.innerHTML = `
+    <span class="text-sm text-slate-500">Mostrando <b>${ini + 1}–${fim}</b> de <b>${total}</b> NFs · 50 por página</span>
+    <div class="flex items-center gap-1">
+      <button data-pag="${pagina - 1}" ${pagina === 1 ? 'disabled' : ''} class="px-2 py-1 rounded-md text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent">‹ Anterior</button>
+      ${botoes}
+      <button data-pag="${pagina + 1}" ${pagina === totalPaginas ? 'disabled' : ''} class="px-2 py-1 rounded-md text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:hover:bg-transparent">Próxima ›</button>
+    </div>`;
+  el.querySelectorAll('[data-pag]').forEach((b) => b.onclick = () => {
+    const n = Number(b.dataset.pag);
+    if (n >= 1 && n <= totalPaginas && n !== pagina) { pagina = n; render(); document.getElementById('busca').scrollIntoView({ block: 'start', behavior: 'smooth' }); }
+  });
+}
 
 /* ===================== DETALHE ===================== */
 function abrirDetalhe(id) {
