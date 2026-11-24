@@ -26,6 +26,10 @@
  *
  * Banco: Cloudflare D1, vinculado ao Worker com o nome DB (tabela "ocorrencias").
  *
+ * LGPD: o documento (CPF/RG) de quem recebeu NÃO é gravado; a imagem do comprovante
+ * não é gravada (só o link). Um gatilho Cron diário apaga ocorrências recebidas há
+ * mais de RETENCAO_DIAS dias (padrão 90).
+ *
  * Ordem de tentativa para cada item:
  *   1. chave_nfe  -> /api/trackingdanfe   (pública, não precisa senha)
  *   2. CNPJ do remetente -> /api/tracking (nro_nf, pedido ou chave)
@@ -36,8 +40,18 @@ const SSW = 'https://ssw.inf.br/api/';
 // SHA-256 do token da URL do webservice (o token em si não fica no código)
 const WEBHOOK_TOKEN_SHA256 = '0706284c04bf4e5db7adb47eca8718e5ab1fc504fd7ce719fce19be5ea01fdf7';
 const MAX_ITENS = 12; // plano grátis: 50 sub-requisições por chamada
+const RETENCAO_DIAS_PADRAO = 90;
 
 export default {
+  // Limpeza diária (configure um gatilho Cron no Worker, ex.: "0 6 * * *")
+  async scheduled(event, env, ctx) {
+    if (!env.DB) return;
+    const dias = Math.max(7, Number(env.RETENCAO_DIAS) || RETENCAO_DIAS_PADRAO);
+    ctx.waitUntil(env.DB.prepare(
+      "DELETE FROM ocorrencias WHERE recebido_em < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)"
+    ).bind(`-${dias} days`).run());
+  },
+
   async fetch(request, env) {
     const cors = corsHeaders(request, env);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -197,7 +211,7 @@ async function receberOcorrenciasSSW(request, env, token) {
         nfResp, String(nf.serieNFe || ''), soDigitos(nf.chaveNFe), pedidoResp,
         Number(cte.numeroSSW || cte.numeroCTe) || null, soDigitos(cte.chaveSSW || cte.chaveCTe),
         isoSSW(oc.dataHoraEvento), String(oc.codigo ?? ''), String(oc.descricao || ''), String(oc.complemento || ''),
-        String(oc.nomeRecebedor || ''), soDigitos(oc.docRecebedor), String(oc.latitude ?? ''), String(oc.longitude ?? ''),
+        String(oc.nomeRecebedor || ''), '' /* documento do recebedor não é gravado (LGPD) */, String(oc.latitude ?? ''), String(oc.longitude ?? ''),
         isoSSW(oc.dataHoraAgendamento), decodeLink(oc.linkComprovante), oc.imagemComprovante ? 1 : 0
       ).first();
       ultimoProtocolo = String(r && r.id ? r.id : '');

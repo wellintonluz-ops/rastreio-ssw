@@ -135,11 +135,10 @@
       <ul class="text-xs text-slate-500 list-disc pl-5 space-y-0.5">
         <li><b>Número da NF</b> — ex.: <code>130516</code></li>
         <li><b>Chave da NF-e</b> (44 dígitos) — funciona mesmo sem senha</li>
-        <li><b>NF + CPF do destinatário</b> separados por <code>;</code> ou tab — ex.: <code>130516;02602602655</code></li>
         <li><b>Pedido</b> — prefixe com <code>P:</code> — ex.: <code>P:A2341232B</code></li>
         <li>Ou use <b>📄 Importar XML / ZIP / Excel</b> — também dá para <b>arrastar os arquivos</b> para a página</li>
       </ul>
-      <textarea id="txtNFs" rows="10" class="w-full border border-slate-300 rounded-lg p-3 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="130516&#10;130517;02602602655&#10;43160400850257000132550010000083991000083990"></textarea>
+      <textarea id="txtNFs" rows="10" class="w-full border border-slate-300 rounded-lg p-3 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="130516&#10;43160400850257000132550010000083991000083990&#10;P:A2341232B"></textarea>
       <label class="flex items-center gap-2 text-sm"><input type="checkbox" id="chkConsultarAgora" checked> Consultar logo após adicionar</label>
     </div>
     <div class="p-5 border-t border-slate-100 flex justify-end gap-2">
@@ -210,7 +209,8 @@ const firebaseConfig = {
   appId: "1:295398939050:web:6da4cfd8a41b9f2a7df3d3",
 };
 const DOMINIO_PERMITIDO = 'grupotbx.com.br';
-const WORKER_PADRAO = 'https://rastreio-ssw.wellinton-luz.workers.dev';
+const WORKER_PADRAO = 'https://rastreio-ssw.grupotbx.workers.dev';
+const WORKER_ANTIGO = 'https://rastreio-ssw.wellinton-luz.workers.dev';
 const LS_DADOS = 'rastreioSSW.v1.itens';
 const LS_WORKER = 'rastreioSSW.v1.worker';
 const LOTE = 12; // itens por chamada ao Worker
@@ -234,9 +234,26 @@ let usuario = null;
 let detalheId = null;
 let consultando = false;
 
-function carregar() { try { return JSON.parse(localStorage.getItem(LS_DADOS)) || []; } catch { return []; } }
+function carregar() {
+  let lista = [];
+  try { lista = JSON.parse(localStorage.getItem(LS_DADOS)) || []; } catch { return []; }
+  // LGPD: retenção — remove NFs entregues há mais de 90 dias e qualquer NF com mais de 180 dias na lista
+  const agora = Date.now(), DIA = 86400000;
+  const antes = lista.length;
+  lista = lista.filter((i) => {
+    const ref = Date.parse(i.ultData || i.adicionadoEm || '') || agora;
+    const add = Date.parse(i.adicionadoEm || '') || agora;
+    if (i.status === 'entregue' && agora - ref > 90 * DIA) return false;
+    if (agora - add > 180 * DIA && agora - ref > 90 * DIA) return false;
+    return true;
+  });
+  let mudou = false;
+  lista.forEach((i) => { if ('resposta' in i || 'docDest' in i || 'cpf' in i) mudou = true; delete i.resposta; delete i.docDest; delete i.cpf; });
+  if (mudou || lista.length !== antes) { try { localStorage.setItem(LS_DADOS, JSON.stringify(lista)); } catch {} }
+  return lista;
+}
 function salvar() { try { localStorage.setItem(LS_DADOS, JSON.stringify(itens)); } catch (e) { toast('Não foi possível salvar no navegador: ' + e.message); } }
-function workerUrl() { try { return (localStorage.getItem(LS_WORKER) || WORKER_PADRAO).replace(/\/+$/, ''); } catch { return WORKER_PADRAO; } }
+function workerUrl() { try { const w = (localStorage.getItem(LS_WORKER) || WORKER_PADRAO).replace(/\/+$/, ''); return w === WORKER_ANTIGO ? WORKER_PADRAO : w; } catch { return WORKER_PADRAO; } }
 
 /* ===================== LOGIN ===================== */
 firebase.initializeApp(firebaseConfig);
@@ -301,6 +318,7 @@ async function verificarWorker() {
 }
 
 /* ===================== ENTRADA DE DADOS ===================== */
+function mascararCPF(c) { const d = soDig(c); return d.length === 11 ? d.slice(0, 3) + '.***.***-' + d.slice(9) : ''; }
 function soDig(v) { return (v == null ? '' : String(v)).replace(/\D/g, ''); }
 function nfDaChave(ch) { return ch.length === 44 ? String(Number(ch.slice(25, 34))) : ''; }
 function chaveItem(it) { return it.chave || (it.nf ? 'NF' + it.nf : '') || (it.pedido ? 'P' + it.pedido : ''); }
@@ -308,10 +326,11 @@ function chaveItem(it) { return it.chave || (it.nf ? 'NF' + it.nf : '') || (it.p
 function novoItem(dados) {
   const it = {
     id: 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-    nf: '', chave: '', pedido: '', cpf: '', cliente: '', cidadeDestino: '',
+    nf: '', chave: '', pedido: '', cliente: '', cidadeDestino: '',
     status: 'pendente', adicionadoEm: new Date().toISOString(), ...dados,
   };
   if (!it.nf && it.chave) it.nf = nfDaChave(it.chave);
+  delete it.cpf; // CPF não é guardado (LGPD: minimização)
   return it;
 }
 
@@ -325,7 +344,7 @@ function adicionarItens(lista) {
     if (!k) continue;
     const ex = existentes.get(k) || (cand.nf && existentes.get('NF' + cand.nf));
     if (ex) {
-      for (const c of ['chave', 'pedido', 'cpf', 'docDest', 'cliente', 'cidadeDestino', 'previsao', 'emissao', 'transportadora', 'valor']) if (cand[c] && !ex[c]) ex[c] = cand[c];
+      for (const c of ['chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'emissao', 'transportadora', 'valor']) if (cand[c] && !ex[c]) ex[c] = cand[c];
       atualizados++; ids.push(ex.id);
     } else {
       itens.push(cand); existentes.set(k, cand); novos++; ids.push(cand.id);
@@ -347,7 +366,6 @@ function interpretarTexto(txt) {
       if (/^p:/i.test(p)) { d.pedido = p.slice(2).trim(); continue; }
       const dig = soDig(p);
       if (dig.length === 44) d.chave = dig;
-      else if (dig.length === 11 && d.nf) d.cpf = dig;
       else if (dig && dig.length <= 9 && dig === p.replace(/[\s.\-]/g, '') && !d.nf) d.nf = String(Number(dig));
       else if (!d.pedido && !dig) d.cliente = p;
     }
@@ -364,7 +382,6 @@ function mapearColunas(cabecalho) {
     if (m.chave == null && /chave/.test(n)) m.chave = i;
     else if (m.nf == null && (/^(nf|nfe|nota|notafiscal|numeronf|numeronota|nronf|nrnf|nnf|numero|nota fiscal)$/.test(n) || /^(numero|nro|n)?(da)?(nf|nota)(e|fiscal)?$/.test(n))) m.nf = i;
     else if (m.pedido == null && /pedido|ordem|venda/.test(n)) m.pedido = i;
-    else if (m.cpf == null && /^(cpf|cpfcnpj|documento|doccliente|cpfdestinatario)$/.test(n)) m.cpf = i;
     else if (m.cliente == null && /^(cliente|destinatario|nome|nomecliente|nomedestinatario|razaosocial)$/.test(n)) m.cliente = i;
     else if (m.cidade == null && /^(cidade|municipio|cidadedestino)$/.test(n)) m.cidade = i;
     else if (m.uf == null && /^(uf|estado)$/.test(n)) m.uf = i;
@@ -386,15 +403,11 @@ function lerXmlNFe(texto) {
   const chave = soDig(t(doc, 'chNFe') || (inf.getAttribute('Id') || ''));
   if (chave.length !== 44) return null;
   if (t(ide, 'tpNF') === '0') return { entrada: true };
-  const cpf = soDig(t(dest, 'CPF'));
-  const cnpj = soDig(t(dest, 'CNPJ'));
   const prev = t(ide, 'dPrevEntrega');
   return {
     chave,
     nf: String(Number(t(ide, 'nNF')) || nfDaChave(chave)),
     pedido: t(inf.getElementsByTagName('compra')[0], 'xPed') || t(inf, 'xPed'),
-    cpf: cpf.length === 11 ? cpf : '',
-    docDest: cpf || cnpj,
     cliente: t(dest, 'xNome'),
     cidadeDestino: ender ? [t(ender, 'xMun'), t(ender, 'UF')].filter(Boolean).join(' / ') : '',
     previsao: prev,
@@ -439,7 +452,6 @@ async function lerPlanilha(f) {
     if (m.chave != null) { const c = soDig(l[m.chave]); if (c.length === 44) d.chave = c; }
     if (m.nf != null) { const n = soDig(l[m.nf]); if (n) d.nf = String(Number(n)); }
     if (m.pedido != null && String(l[m.pedido]).trim()) d.pedido = String(l[m.pedido]).trim();
-    if (m.cpf != null) { const c = soDig(l[m.cpf]); if (c.length === 11) d.cpf = c; }
     if (m.cliente != null) d.cliente = String(l[m.cliente]).trim();
     if (m.cidade != null) d.cidadeDestino = String(l[m.cidade]).trim() + (m.uf != null && l[m.uf] ? ' / ' + l[m.uf] : '');
     if (d.nf || d.chave || d.pedido) lista.push(d);
@@ -488,7 +500,7 @@ async function consultar(ids) {
       try {
         const j = await chamarWorker('/rastrear', {
           method: 'POST',
-          body: JSON.stringify({ itens: lote.map((it) => ({ id: it.id, nf: it.nf, chave: it.chave, pedido: it.pedido, cpf: it.cpf })) }),
+          body: JSON.stringify({ itens: lote.map((it) => ({ id: it.id, nf: it.nf, chave: it.chave, pedido: it.pedido })) }),
         });
         for (const r of j.resultados || []) aplicarResultado(r);
       } catch (e) {
@@ -527,7 +539,6 @@ function aplicarResultado(r) {
   }
   it.erroApi = '';
   const p = interpretarSSW(r.resposta);
-  it.resposta = r.resposta;
   it.eventosApi = p.eventos;
   it.cabecalho = p.cabecalho;
   if (!it.cliente && p.cabecalho.destinatario) it.cliente = p.cabecalho.destinatario;
@@ -545,7 +556,7 @@ function eventoWS(o) {
     dataISO: o.data_evento || '', codigo: String(Number(o.codigo) || o.codigo || ''),
     ocorrencia: (o.codigo ? o.codigo + ' - ' : '') + (o.descricao || ''),
     descricao: o.complemento || '', tipo: '', local: '',
-    recebedor: [o.recebedor, o.doc_recebedor].filter(Boolean).join(' — '),
+    recebedor: o.recebedor || '',
     agendamento: o.agendamento || '', link: o.link_comprovante || '', fonte: 'ssw',
   };
 }
@@ -587,7 +598,8 @@ let sincronizando = false, ultimaSync = null;
 async function sincronizarOcorrencias(silencioso = true) {
   if (sincronizando || !usuario) return;
   sincronizando = true;
-  let aposId = 0; try { aposId = Number(localStorage.getItem(LS_ULT_OC)) || 0; } catch {}
+  const chaveCursor = LS_ULT_OC + '|' + workerUrl();
+  let aposId = 0; try { aposId = Number(localStorage.getItem(chaveCursor)) || 0; } catch {}
   let novas = 0, nfsNovas = 0;
   try {
     for (let volta = 0; volta < 20; volta++) {
@@ -611,7 +623,7 @@ async function sincronizarOcorrencias(silencioso = true) {
       }
       tocados.forEach(recalcular);
       aposId = j.ultimo_id || aposId;
-      try { localStorage.setItem(LS_ULT_OC, String(aposId)); } catch {}
+      try { localStorage.setItem(chaveCursor, String(aposId)); } catch {}
       if (!j.mais) break;
     }
     ultimaSync = new Date();
@@ -674,7 +686,7 @@ function normalizarEvento(e) {
     descricao: (e.descricao || e.observacao || '').toString().trim(),
     tipo: (e.tipo || '').toString().trim(),
     local: [cidade, filial && filial !== cidade ? '(' + filial + ')' : ''].filter(Boolean).join(' '),
-    recebedor: [e.nome_recebedor, e.nro_doc_recebedor].filter(Boolean).join(' — '),
+    recebedor: e.nome_recebedor || '', // documento do recebedor não é guardado (LGPD)
   };
 }
 function paraISO(s) {
@@ -774,7 +786,7 @@ function render() {
     const alerta = i.diasParado != null && i.diasParado >= 3 ? 'text-red-600 font-semibold' : '';
     const pendAtual = ['ocorrencia', 'devolucao'].includes(i.status);
     return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer align-top" data-id="${i.id}">
-      <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}${i.cpf ? '<span class="ml-1 text-[10px] font-normal text-slate-400" title="CPF informado">CPF</span>' : ''}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
+      <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
       <td class="px-2 py-2"><div class="truncate" title="${esc(i.cliente)}">${esc(i.cliente)}</div><div class="text-[11px] text-slate-400 truncate">${esc(i.cidadeDestino)}</div></td>
       <td class="px-2 py-2">${badge(i.status)}</td>
       <td class="px-2 py-2">${i.ultPendencia ? `<div class="line-clamp-2 leading-snug ${pendAtual ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-[11px] text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + 'x' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
@@ -819,7 +831,7 @@ function abrirDetalhe(id) {
   document.getElementById('detTitulo').textContent = it.nf || it.pedido || it.chave;
   document.getElementById('detStatus').innerHTML = badge(it.status);
   const info = [
-    ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], ['CPF', it.cpf ? it.cpf.replace(/(\d{3})\d{6}(\d{2})/, '$1.***.***-$2') : ''],
+    ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], 
     ['Transportadora (NF)', it.transportadora || (it.cnpjTransp ? 'CNPJ ' + it.cnpjTransp : '')], ['Agendamento', it.agendamento ? fmtData(it.agendamento) : ''], ['Emissão', fmtData(it.emissao)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
     ['Remetente', it.cabecalho?.remetente], ['Previsão', it.prevISO ? fmtDia(it.prevISO) + (it.atraso > 0 ? ` (${it.atraso}d de atraso)` : '') : ''], ['Recebedor', it.recebedor],
     ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
@@ -840,7 +852,7 @@ function abrirDetalhe(id) {
       ${e.link ? `<a href="${esc(e.link)}" target="_blank" rel="noopener" class="text-xs text-blue-600 hover:underline mt-0.5 inline-block">📄 Ver comprovante de entrega</a>` : ''}
     </li>`;
   }).join('') : `<li class="ml-5 text-sm text-slate-500">${esc(it.mensagem || 'Ainda não consultada.')}</li>`;
-  document.getElementById('detRaw').textContent = JSON.stringify({ tentativas: it.tentativas, resposta: it.resposta }, null, 2);
+  document.getElementById('detRaw').textContent = JSON.stringify({ tentativas: it.tentativas, ocorrenciasRecebidasDoSSW: (it.ocorrenciasWS || []).length }, null, 2);
   document.getElementById('overlayDet').classList.remove('hidden');
   document.getElementById('drawer').classList.remove('translate-x-full');
 }
