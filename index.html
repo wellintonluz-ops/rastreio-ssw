@@ -88,6 +88,7 @@
             <option value="0">—</option><option value="2">2 dias</option><option value="3">3 dias</option><option value="5">5 dias</option><option value="7">7 dias</option>
           </select>
         </label>
+        <label class="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" id="filtroPend"> Só com pendência</label>
         <span id="contagem" class="text-sm text-slate-500"></span>
       </div>
       <div class="overflow-x-auto scroll-thin">
@@ -101,6 +102,7 @@
               <th class="text-left px-3 py-2">Última ocorrência</th>
               <th class="text-left px-3 py-2 sortable" data-sort="ultData">Data</th>
               <th class="text-left px-3 py-2">Local</th>
+              <th class="text-left px-3 py-2 sortable" data-sort="ultPendData" title="Última ocorrência de problema (ausente, recusa, endereço, avaria…), mesmo que já tenha sido resolvida">Última pendência</th>
               <th class="text-right px-3 py-2 sortable" data-sort="diasParado" title="Dias desde a última ocorrência">Parado</th>
               <th class="text-right px-3 py-2 sortable" data-sort="diasTotal" title="Dias desde a primeira ocorrência">Total</th>
               <th class="text-left px-3 py-2 sortable" data-sort="consultadoEm">Consultado</th>
@@ -460,6 +462,13 @@ function aplicarResultado(r) {
   it.recebedor = ult ? ult.recebedor : '';
   it.primData = p.eventos[0] ? p.eventos[0].dataISO : '';
   it.status = ult ? classificar(ult) : 'nao_localizado';
+  const pends = p.eventos.filter(ehPendencia);
+  const up = pends[pends.length - 1];
+  it.qtdPendencias = pends.length;
+  it.ultPendencia = up ? up.ocorrencia : '';
+  it.ultPendDescricao = up ? up.descricao : '';
+  it.ultPendData = up ? up.dataISO : '';
+  it.ultPendLocal = up ? up.local : '';
   it.mensagem = ult ? '' : (r.resposta && r.resposta.message) || 'Sem ocorrências';
 }
 
@@ -518,6 +527,9 @@ function paraISO(s) {
   if (m) { const a = m[3].length === 2 ? '20' + m[3] : m[3]; return `${a}-${m[2]}-${m[1]}T${m[4] || '00'}:${m[5] || '00'}:00`; }
   return s;
 }
+function ehPendencia(ev) {
+  return ['ocorrencia', 'devolucao'].includes(classificar(ev)) || /pend/i.test(ev.tipo || '');
+}
 function classificar(ev) {
   const t = norm(ev.ocorrencia + ' ' + ev.descricao);
   const tipo = norm(ev.tipo);
@@ -565,13 +577,15 @@ function render() {
   // Filtro
   const q = norm(document.getElementById('busca').value);
   const parado = Number(document.getElementById('filtroParado').value);
+  const soPend = document.getElementById('filtroPend').checked;
   let lista = itens.filter((i) => {
     if (filtroStatus) {
       const grupo = { ocorrencia: ['ocorrencia', 'devolucao'], nao_localizado: ['nao_localizado', 'erro'] }[filtroStatus] || [filtroStatus];
       if (!grupo.includes(i.status)) return false;
     }
     if (parado && !(i.diasParado != null && i.diasParado > parado)) return false;
-    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.chave].join(' ')).includes(q)) return false;
+    if (soPend && !i.ultPendencia) return false;
+    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, i.chave].join(' ')).includes(q)) return false;
     return true;
   });
   const { campo, dir } = ordenacao;
@@ -595,6 +609,7 @@ function render() {
       <td class="px-3 py-2 max-w-[320px]"><div class="truncate" title="${esc(i.ultOcorrencia || i.mensagem)}">${esc(i.ultOcorrencia || i.mensagem || '')}</div>${i.ultDescricao ? `<div class="text-xs text-slate-400 truncate" title="${esc(i.ultDescricao)}">${esc(i.ultDescricao)}</div>` : ''}</td>
       <td class="px-3 py-2 whitespace-nowrap text-slate-600">${fmtData(i.ultData)}</td>
       <td class="px-3 py-2 max-w-[180px] truncate text-slate-600" title="${esc(i.ultLocal)}">${esc(i.ultLocal)}</td>
+      <td class="px-3 py-2 max-w-[260px]">${i.ultPendencia ? `<div class="truncate ${['ocorrencia', 'devolucao'].includes(i.status) ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-xs text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + ' pendências' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
       <td class="px-3 py-2 text-right ${alerta}">${i.diasParado != null ? i.diasParado + 'd' : ''}</td>
       <td class="px-3 py-2 text-right text-slate-600">${i.diasTotal != null ? i.diasTotal + 'd' : ''}</td>
       <td class="px-3 py-2 whitespace-nowrap text-xs text-slate-400">${i.consultadoEm ? fmtData(i.consultadoEm) : ''}</td>
@@ -625,6 +640,7 @@ document.querySelectorAll('th.sortable').forEach((th) => th.onclick = () => {
 });
 document.getElementById('busca').oninput = render;
 document.getElementById('filtroParado').onchange = render;
+document.getElementById('filtroPend').onchange = render;
 
 /* ===================== DETALHE ===================== */
 function abrirDetalhe(id) {
@@ -636,9 +652,10 @@ function abrirDetalhe(id) {
   const info = [
     ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], ['CPF', it.cpf ? it.cpf.replace(/(\d{3})\d{6}(\d{2})/, '$1.***.***-$2') : ''],
     ['Remetente', it.cabecalho?.remetente], ['Previsão', it.previsao], ['Recebedor', it.recebedor],
+    ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
     ['Dias em trânsito', it.diasTotal != null ? it.diasTotal + ' dia(s)' : ''], ['Consultado em', fmtData(it.consultadoEm)], ['Fonte', it.fonte],
   ].filter(([, v]) => v);
-  document.getElementById('detInfo').innerHTML = info.map(([k, v]) => `<div><div class="text-xs text-slate-500">${k}</div><div class="font-medium break-words">${esc(v)}</div></div>`).join('')
+  document.getElementById('detInfo').innerHTML = info.map(([k, v]) => `<div><div class="text-xs text-slate-500">${k}</div><div class="font-medium break-words ${k === 'Última pendência' ? 'text-amber-700' : ''}">${esc(v)}</div></div>`).join('')
     + (it.chave ? `<div class="col-span-2"><div class="text-xs text-slate-500">Chave NF-e</div><div class="font-mono text-xs break-all">${esc(it.chave)}</div></div>` : '');
   const evs = (it.eventos || []).slice().reverse();
   document.getElementById('detTimeline').innerHTML = evs.length ? evs.map((e, idx) => {
@@ -646,7 +663,7 @@ function abrirDetalhe(id) {
     return `<li class="ml-5">
       <span class="absolute -left-[7px] mt-1 tl-dot ${idx === 0 ? st.dot : 'bg-slate-300'} ring-4 ring-white"></span>
       <div class="text-xs text-slate-500">${fmtData(e.dataISO)}${e.local ? ' · ' + esc(e.local) : ''}</div>
-      <div class="font-medium ${idx === 0 ? '' : 'text-slate-600'}">${esc(e.ocorrencia)}</div>
+      <div class="font-medium ${ehPendencia(e) ? 'text-amber-700' : idx === 0 ? '' : 'text-slate-600'}">${esc(e.ocorrencia)}${ehPendencia(e) ? ' <span class="ml-1 text-[10px] uppercase bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">pendência</span>' : ''}</div>
       ${e.descricao ? `<div class="text-sm text-slate-500">${esc(e.descricao)}</div>` : ''}
       ${e.recebedor ? `<div class="text-xs text-slate-500 mt-0.5">Recebedor: ${esc(e.recebedor)}</div>` : ''}
     </li>`;
@@ -689,7 +706,8 @@ document.getElementById('btnExportar').onclick = () => {
   const linhas = itens.map((i) => ({
     'NF': i.nf, 'Pedido': i.pedido, 'Chave NF-e': i.chave, 'Cliente': i.cliente, 'Destino': i.cidadeDestino,
     'Status': (STATUS[i.status] || {}).label, 'Última ocorrência': i.ultOcorrencia || i.mensagem || '', 'Descrição': i.ultDescricao || '',
-    'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
+    'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal,
+    'Última pendência': i.ultPendencia || '', 'Descrição pendência': i.ultPendDescricao || '', 'Data última pendência': fmtData(i.ultPendData), 'Local pendência': i.ultPendLocal || '', 'Qtd. pendências': i.qtdPendencias || 0, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
     'Previsão': i.previsao || '', 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
   }));
   const ws = XLSX.utils.json_to_sheet(linhas);
