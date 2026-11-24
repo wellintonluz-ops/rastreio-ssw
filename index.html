@@ -39,7 +39,7 @@
 <!-- APP -->
 <div id="app" class="hidden">
   <header class="bg-slate-900 text-white">
-    <div class="max-w-[1500px] mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
+    <div class="w-full mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
       <div class="text-2xl">🚚</div>
       <div>
         <h1 class="font-semibold leading-tight">Rastreio de Entregas SSW</h1>
@@ -54,7 +54,7 @@
     </div>
   </header>
 
-  <main class="max-w-[1500px] mx-auto px-4 py-5 space-y-5">
+  <main class="w-full mx-auto px-4 py-5 space-y-5">
 
     <!-- Barra de ações -->
     <section class="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-center gap-2">
@@ -93,23 +93,21 @@
         <label class="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" id="filtroAtraso"> Só atrasadas</label>
         <span id="contagem" class="text-sm text-slate-500"></span>
       </div>
-      <div class="overflow-x-auto scroll-thin">
-        <table class="w-full text-sm">
-          <thead class="bg-slate-50 text-slate-500 text-xs uppercase tracking-wide">
+      <div>
+        <table class="w-full text-sm table-fixed">
+          <colgroup>
+            <col style="width:9%"><col style="width:15%"><col style="width:10%"><col style="width:20%"><col style="width:25%"><col style="width:8%"><col style="width:8%"><col style="width:5%">
+          </colgroup>
+          <thead class="bg-slate-50 text-slate-500 text-[11px] uppercase tracking-wide">
             <tr>
-              <th class="text-left px-3 py-2 sortable" data-sort="nf">NF</th>
-              <th class="text-left px-3 py-2 sortable" data-sort="pedido">Pedido</th>
-              <th class="text-left px-3 py-2 sortable" data-sort="cliente">Cliente / Destino</th>
-              <th class="text-left px-3 py-2 sortable" data-sort="status">Status</th>
-              <th class="text-left px-3 py-2 sortable" data-sort="ultPendData" title="Última ocorrência de problema (ausente, recusa, endereço, avaria…), mesmo que já tenha sido resolvida">Última pendência</th>
-              <th class="text-left px-3 py-2">Última ocorrência</th>
-              <th class="text-left px-3 py-2 sortable" data-sort="ultData">Data</th>
-              <th class="text-left px-3 py-2 sortable" data-sort="prevISO" title="Previsão de entrega (SSW ou dPrevEntrega do XML)">Previsão</th>
-              <th class="text-left px-3 py-2">Local</th>
-              <th class="text-right px-3 py-2 sortable" data-sort="diasParado" title="Dias desde a última ocorrência">Parado</th>
-              <th class="text-right px-3 py-2 sortable" data-sort="diasTotal" title="Dias desde a primeira ocorrência">Total</th>
-              <th class="text-left px-3 py-2 sortable" data-sort="consultadoEm">Consultado</th>
-              <th class="px-3 py-2"></th>
+              <th class="text-left px-2 py-2 sortable" data-sort="nf">NF / Pedido</th>
+              <th class="text-left px-2 py-2 sortable" data-sort="cliente">Cliente / Destino</th>
+              <th class="text-left px-2 py-2 sortable" data-sort="status">Status</th>
+              <th class="text-left px-2 py-2 sortable" data-sort="ultPendData" title="Última ocorrência de problema (ausente, recusa, endereço, avaria…), mesmo que já tenha sido resolvida">Última pendência</th>
+              <th class="text-left px-2 py-2 sortable" data-sort="ultData">Última ocorrência</th>
+              <th class="text-left px-2 py-2 sortable" data-sort="prevISO" title="Previsão de entrega (SSW ou dPrevEntrega do XML)">Previsão</th>
+              <th class="text-right px-2 py-2 sortable" data-sort="diasParado">Dias</th>
+              <th class="px-1 py-2"></th>
             </tr>
           </thead>
           <tbody id="tbody"></tbody>
@@ -691,21 +689,17 @@ function render() {
   document.getElementById('vazio').classList.toggle('hidden', itens.length > 0);
   document.getElementById('tbody').innerHTML = lista.map((i) => {
     const alerta = i.diasParado != null && i.diasParado >= 3 ? 'text-red-600 font-semibold' : '';
-    return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer" data-id="${i.id}">
-      <td class="px-3 py-2 font-medium whitespace-nowrap">${esc(i.nf || '—')}${i.cpf ? '<span class="ml-1 text-[10px] text-slate-400" title="CPF informado">CPF</span>' : ''}</td>
-      <td class="px-3 py-2 whitespace-nowrap text-slate-600">${esc(i.pedido)}</td>
-      <td class="px-3 py-2 max-w-[220px]"><div class="truncate" title="${esc(i.cliente)}">${esc(i.cliente)}</div><div class="text-xs text-slate-400 truncate">${esc(i.cidadeDestino)}</div></td>
-      <td class="px-3 py-2">${badge(i.status)}</td>
-      <td class="px-3 py-2 max-w-[260px]">${i.ultPendencia ? `<div class="truncate ${['ocorrencia', 'devolucao'].includes(i.status) ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-xs text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + ' pendências' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
-      <td class="px-3 py-2 max-w-[320px]"><div class="truncate" title="${esc(i.ultOcorrencia || i.mensagem)}">${esc(i.ultOcorrencia || i.mensagem || '')}</div>${i.ultDescricao ? `<div class="text-xs text-slate-400 truncate" title="${esc(i.ultDescricao)}">${esc(i.ultDescricao)}</div>` : ''}</td>
-      <td class="px-3 py-2 whitespace-nowrap text-slate-600">${fmtData(i.ultData)}</td>
-      <td class="px-3 py-2 whitespace-nowrap">${i.prevISO ? `<div class="${i.atraso > 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmtDia(i.prevISO)}</div>${i.atraso > 0 ? `<div class="text-xs text-red-500">${i.status === 'entregue' ? 'entregue com ' : ''}${i.atraso}d de atraso</div>` : ''}` : ''}</td>
-      <td class="px-3 py-2 max-w-[180px] truncate text-slate-600" title="${esc(i.ultLocal)}">${esc(i.ultLocal)}</td>
-      <td class="px-3 py-2 text-right ${alerta}">${i.diasParado != null ? i.diasParado + 'd' : ''}</td>
-      <td class="px-3 py-2 text-right text-slate-600">${i.diasTotal != null ? i.diasTotal + 'd' : ''}</td>
-      <td class="px-3 py-2 whitespace-nowrap text-xs text-slate-400">${i.consultadoEm ? fmtData(i.consultadoEm) : ''}</td>
-      <td class="px-3 py-2 whitespace-nowrap text-right">
-        <button class="text-slate-400 hover:text-emerald-600 px-1" data-acao="atualizar" title="Consultar agora">⟳</button>
+    const pendAtual = ['ocorrencia', 'devolucao'].includes(i.status);
+    return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer align-top" data-id="${i.id}">
+      <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}${i.cpf ? '<span class="ml-1 text-[10px] font-normal text-slate-400" title="CPF informado">CPF</span>' : ''}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
+      <td class="px-2 py-2"><div class="truncate" title="${esc(i.cliente)}">${esc(i.cliente)}</div><div class="text-[11px] text-slate-400 truncate">${esc(i.cidadeDestino)}</div></td>
+      <td class="px-2 py-2">${badge(i.status)}</td>
+      <td class="px-2 py-2">${i.ultPendencia ? `<div class="line-clamp-2 leading-snug ${pendAtual ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-[11px] text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + 'x' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
+      <td class="px-2 py-2"><div class="line-clamp-2 leading-snug" title="${esc((i.ultOcorrencia || i.mensagem || '') + (i.ultDescricao ? ' — ' + i.ultDescricao : ''))}">${esc(i.ultOcorrencia || i.mensagem || '')}</div><div class="text-[11px] text-slate-400 truncate" title="${esc(i.ultLocal)}">${fmtData(i.ultData)}${i.ultLocal ? ' · ' + esc(i.ultLocal) : ''}</div></td>
+      <td class="px-2 py-2 whitespace-nowrap">${i.prevISO ? `<div class="${i.atraso > 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmtDia(i.prevISO)}</div>${i.atraso > 0 ? `<div class="text-[11px] text-red-500">${i.status === 'entregue' ? 'entregue ' : ''}+${i.atraso}d atraso</div>` : ''}` : ''}</td>
+      <td class="px-2 py-2 text-right whitespace-nowrap"><div class="${alerta}" title="Dias desde a última ocorrência">${i.diasParado != null ? i.diasParado + 'd parado' : ''}</div><div class="text-[11px] text-slate-400" title="Dias desde a primeira ocorrência">${i.diasTotal != null ? i.diasTotal + 'd total' : ''}</div></td>
+      <td class="px-1 py-2 whitespace-nowrap text-right">
+        <button class="text-slate-400 hover:text-emerald-600 px-1" data-acao="atualizar" title="Consultar agora${i.consultadoEm ? ' (última: ' + fmtData(i.consultadoEm) + ')' : ''}">⟳</button>
         <button class="text-slate-400 hover:text-red-600 px-1" data-acao="remover" title="Remover">✕</button>
       </td></tr>`;
   }).join('');
