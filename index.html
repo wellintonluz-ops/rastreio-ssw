@@ -938,7 +938,7 @@ function classificar(ev) {
   const tipo = norm(ev.tipo);
   if (/devolu|retornoaoremetente|devolvid/.test(t)) return 'devolucao';
   if (/(mercadoriaentregue|entregarealizada|entregue)/.test(t) && !/naoentregue|parcial|entregueparcial/.test(t)) return 'entregue';
-  if (/naoentregue|parcial|recus|extravi|avari|sinistr|ausente|naolocaliz|enderecoincorreto|enderecoinsuficiente|fechado|retid|bloque|reentrega|insucesso|falta|roubo|aguardando|agendamento|pendencia|impedimento|naoatendid|reclamacao/.test(t) || /pendencia/.test(tipo)) return 'ocorrencia';
+  if (/naoentregue|naoefetuad|prejudicad|parcial|recus|extravi|avari|sinistr|ausente|naolocaliz|enderecoincorreto|enderecoinsuficiente|fechado|retid|bloque|reentrega|insucesso|falta|roubo|aguardando|agendamento|pendencia|impedimento|naoatendid|reclamacao|mercadoriaemanalise|mercadoriadevolvid|desacordo|ruralzona|zonarural|arearisco|areaderisco/.test(t) || /pendencia/.test(tipo)) return 'ocorrencia';
   if (/saidaparaentrega|saiuparaentrega|emrotadeentrega|emrotaentrega|emtransitoparaentrega|saidaentrega|rotadeentrega/.test(t)) return 'saiu';
   return 'transito';
 }
