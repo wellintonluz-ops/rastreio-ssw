@@ -23,3 +23,6 @@ Elas ficam no banco D1 `rastreio-ssw` (esquema em `schema.sql`) e o painel sincr
 - `rastreio_config/ws`: cursor compartilhado das ocorrências do webservice (só um navegador grava cada lote).
 - Regras do Firestore: leitura/gravação só para contas @grupotbx.com.br com e-mail verificado.
 - Nada sensível no código do site: a senha da SSW fica só no Worker; o documento do recebedor é removido.
+
+### Comprovante de entrega
+O link do comprovante vem só pela integração SSW2181 (a API pública não traz). Quando a transportadora reenvia uma ocorrência com informação nova (link, recebedor, complemento, agendamento), o Worker grava a atualização com um `seq` novo e `versao`+1, e o painel recebe de novo sem contar a ocorrência duas vezes. Um reenvio sem link nunca apaga o link já recebido.

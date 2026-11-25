@@ -822,14 +822,14 @@ function aplicarEventosWS(it, eventos) {
       it.status = classificar(e); it.mensagem = ''; it.erroApi = '';
     }
     if (ehPendencia(e)) {
-      it.qtdPendencias = (it.qtdPendencias || 0) + 1;
+      if (!e.versao) it.qtdPendencias = (it.qtdPendencias || 0) + 1; // reenvio atualizado não conta de novo
       if (!it.ultPendData || (e.dataISO || '') >= it.ultPendData) { it.ultPendencia = e.ocorrencia; it.ultPendDescricao = e.descricao; it.ultPendData = e.dataISO; it.ultPendLocal = ''; }
     }
     if (e.recebedor) it.recebedor = e.recebedor;
     if (e.link) it.linkComprovante = e.link;
     if (e.agendamento) it.agendamento = e.agendamento;
     if (!it.primData || (e.dataISO && e.dataISO < it.primData)) it.primData = e.dataISO;
-    it.qtdWS = (it.qtdWS || 0) + 1;
+    if (!e.versao) it.qtdWS = (it.qtdWS || 0) + 1;
   }
 }
 
@@ -842,6 +842,7 @@ function eventoWS(o) {
     descricao: o.complemento || '', tipo: '', local: '',
     recebedor: o.recebedor || '',
     agendamento: o.agendamento || '', link: o.link_comprovante || '', fonte: 'ssw',
+    versao: Number(o.versao) || 0,
   };
 }
 function recalcular(it) {

@@ -112,10 +112,11 @@ export default {
         }
         const aposId = Math.max(0, Number(url.searchParams.get('apos_id')) || 0);
         const limite = Math.min(5000, Math.max(1, Number(url.searchParams.get('limite')) || 2000));
+        // o cursor do painel (apos_id) é o seq: traz ocorrências novas e as atualizadas depois da última leitura
         const { results } = await env.DB.prepare(
-          `SELECT ${campos} FROM ocorrencias WHERE id > ? ORDER BY id LIMIT ?`
+          `SELECT ${campos}, seq, versao FROM ocorrencias WHERE seq > ? ORDER BY seq LIMIT ?`
         ).bind(aposId, limite).all();
-        return json({ ok: true, ocorrencias: results, ultimo_id: results.length ? results[results.length - 1].id : aposId, mais: results.length === limite }, 200, cors);
+        return json({ ok: true, ocorrencias: results, ultimo_id: results.length ? results[results.length - 1].seq : aposId, mais: results.length === limite }, 200, cors);
       }
 
       return json({ ok: false, erro: 'Rota não encontrada' }, 404, cors);
@@ -224,6 +225,12 @@ function limparDocumentos(o) {
 
 /* ------------- Webservice de ocorrências (SSW2181) -------------- */
 
+// a ocorrência reenviada trouxe informação nova? (link do comprovante, recebedor, complemento, agendamento)
+const MUDOU = `((excluded.link_comprovante <> '' AND excluded.link_comprovante IS NOT link_comprovante)
+  OR (excluded.recebedor <> '' AND excluded.recebedor IS NOT recebedor)
+  OR (excluded.complemento <> '' AND excluded.complemento IS NOT complemento)
+  OR (excluded.agendamento <> '' AND excluded.agendamento IS NOT agendamento))`;
+
 async function receberOcorrenciasSSW(request, env, token) {
   const agora = new Date();
   const dataHora = fmtSSW(agora);
@@ -245,11 +252,20 @@ async function receberOcorrenciasSSW(request, env, token) {
       if (!oc.codigo && !oc.descricao) continue;
       nfResp = Number(nf.numeroNFe) || 0; pedidoResp = nf.pedido || '';
       const r = await env.DB.prepare(
+        // seq: ordem de entrega ao painel. Ocorrência nova ou ATUALIZADA (ex.: o link do comprovante chegou depois)
+        // ganha um seq novo e versao+1, para o painel receber a atualização sem contar o evento de novo.
+        // Reenvio sem link não apaga o link já recebido.
         `INSERT INTO ocorrencias (recebido_em, cnpj_transp, cnpj_pagador, nf, serie, chave, pedido, cte_numero, cte_chave,
-          data_evento, codigo, descricao, complemento, recebedor, doc_recebedor, latitude, longitude, agendamento, link_comprovante, tem_imagem)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(chave_nf, data_evento, codigo) DO UPDATE SET complemento = excluded.complemento, recebedor = excluded.recebedor,
-           doc_recebedor = excluded.doc_recebedor, link_comprovante = excluded.link_comprovante, tem_imagem = excluded.tem_imagem
+          data_evento, codigo, descricao, complemento, recebedor, doc_recebedor, latitude, longitude, agendamento, link_comprovante, tem_imagem, seq)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ocorrencias))
+         ON CONFLICT(chave_nf, data_evento, codigo) DO UPDATE SET
+           seq = CASE WHEN ${MUDOU} THEN (SELECT COALESCE(MAX(seq), 0) + 1 FROM ocorrencias) ELSE seq END,
+           versao = CASE WHEN ${MUDOU} THEN versao + 1 ELSE versao END,
+           complemento = CASE WHEN excluded.complemento <> '' THEN excluded.complemento ELSE complemento END,
+           recebedor = CASE WHEN excluded.recebedor <> '' THEN excluded.recebedor ELSE recebedor END,
+           agendamento = CASE WHEN excluded.agendamento <> '' THEN excluded.agendamento ELSE agendamento END,
+           link_comprovante = CASE WHEN excluded.link_comprovante <> '' THEN excluded.link_comprovante ELSE link_comprovante END,
+           tem_imagem = MAX(tem_imagem, excluded.tem_imagem)
          RETURNING id`
       ).bind(
         agora.toISOString(), soDigitos(o.cnpjTransportadora), soDigitos(o.cnpjPagador),
