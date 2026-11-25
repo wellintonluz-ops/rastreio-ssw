@@ -348,7 +348,10 @@ let nomesTransp = {};
 async function carregarTransportadoras() {
   try { const d = await db.collection(COL_CONFIG).doc('transportadoras').get(); nomesTransp = (d.exists && d.get('nomes')) || {}; } catch (e) { console.warn(e); }
 }
+let ultimaTentativaTransp = 0;
 async function completarTransportadoras() {
+  if (Date.now() - ultimaTentativaTransp < 600000) return;
+  ultimaTentativaTransp = Date.now();
   const faltam = [...new Set(itens.map((i) => i.cnpjTransp).filter((c) => c && !nomesTransp[c]))].slice(0, 20);
   if (!faltam.length) return;
   const novos = {};
@@ -363,6 +366,16 @@ async function completarTransportadoras() {
   Object.assign(nomesTransp, novos);
   try { await db.collection(COL_CONFIG).doc('transportadoras').set({ nomes: novos }, { merge: true }); } catch (e) { console.warn(e); }
   render();
+}
+async function renomearTransportadora(cnpj) {
+  if (!cnpj) return;
+  const atual = nomesTransp[cnpj] || '';
+  const nome = prompt(`Nome da transportadora para o CNPJ ${cnpj}:`, atual);
+  if (nome === null) return;
+  const limpo = nome.trim();
+  nomesTransp[cnpj] = limpo || atual;
+  try { await db.collection(COL_CONFIG).doc('transportadoras').set({ nomes: { [cnpj]: nomesTransp[cnpj] } }, { merge: true }); } catch (e) { toast('Erro ao salvar: ' + e.message); }
+  render(); if (detalheId) abrirDetalhe(detalheId, false);
 }
 function nomeTransportadora(it) {
   return it.transportadora || (it.cnpjTransp && nomesTransp[it.cnpjTransp]) || (it.cnpjTransp ? 'CNPJ ' + it.cnpjTransp : '');
@@ -1176,7 +1189,7 @@ function abrirDetalhe(id, buscar = true) {
     ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
     ['Dias em trânsito', it.diasTotal != null ? it.diasTotal + ' dia(s)' : ''], ['Consultado em', fmtData(it.consultadoEm)], ['Fonte', it.fonte],
   ].filter(([, v]) => v);
-  document.getElementById('detInfo').innerHTML = info.map(([k, v]) => `<div><div class="text-xs text-slate-500">${k}</div><div class="font-medium break-words ${k === 'Última pendência' ? 'text-amber-700' : ''}">${esc(v)}</div></div>`).join('')
+  document.getElementById('detInfo').innerHTML = info.map(([k, v]) => `<div><div class="text-xs text-slate-500">${k}${k === 'Transportadora' && it.cnpjTransp ? ` <button class="text-blue-600 hover:underline ml-1" onclick="renomearTransportadora('${esc(it.cnpjTransp)}')" title="Mudar o nome desta transportadora (vale para todas as NFs dela)">✎ renomear</button>` : ''}</div><div class="font-medium break-words ${k === 'Última pendência' ? 'text-amber-700' : ''}">${esc(v)}</div></div>`).join('')
     + (it.chave ? `<div class="col-span-2"><div class="text-xs text-slate-500">Chave NF-e</div><div class="font-mono text-xs break-all">${esc(it.chave)}</div></div>` : '');
   const evs = (it._historicoCompleto || (it.eventos || []).length ? (it.eventos || []) : []).slice().reverse();
   if (buscar && !it._historicoCompleto && !evs.length) { document.getElementById('overlayDet').classList.remove('hidden'); document.getElementById('drawer').classList.remove('translate-x-full'); return; }

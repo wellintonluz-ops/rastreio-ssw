@@ -24,7 +24,7 @@
  *                             transportadoras (EDI SSW2181). Sem login; protegido pelo token da URL.
  *   GET  /ocorrencias?apos_id=N&limite=2000 -> ocorrências recebidas (para o painel, com login)
  *   GET  /ocorrencias?chave=...  (ou nf=...) -> histórico de uma NF
- *   GET  /transportadora?cnpj=...  -> nome da transportadora (BrasilAPI)
+ *   GET  /transportadora?cnpj=...  -> nome da transportadora (BrasilAPI / CNPJ.ws / ReceitaWS)
  *
  * Banco: Cloudflare D1, vinculado ao Worker com o nome DB (tabela "ocorrencias").
  *
@@ -94,10 +94,9 @@ export default {
       if (url.pathname === '/transportadora' && request.method === 'GET') {
         const cnpj = soDigitos(url.searchParams.get('cnpj'));
         if (cnpj.length !== 14) return json({ ok: false, erro: 'CNPJ inválido' }, 400, cors);
-        const r = await fetch('https://brasilapi.com.br/api/cnpj/v1/' + cnpj, { cf: { cacheTtl: 2592000, cacheEverything: true } });
-        if (!r.ok) return json({ ok: false, erro: 'CNPJ não encontrado (' + r.status + ')' }, 200, cors);
-        const j = await r.json();
-        return json({ ok: true, cnpj, razao_social: j.razao_social || '', nome_fantasia: j.nome_fantasia || '', municipio: j.municipio || '', uf: j.uf || '' }, 200, cors);
+        const dados = await buscarCnpj(cnpj);
+        if (!dados) return json({ ok: false, erro: 'Não consegui consultar o CNPJ agora (fontes públicas ocupadas). Tente mais tarde ou informe o nome manualmente.' }, 200, cors);
+        return json({ ok: true, cnpj, ...dados }, 200, cors);
       }
 
       if (url.pathname === '/ocorrencias' && request.method === 'GET') {
@@ -126,6 +125,20 @@ export default {
     }
   },
 };
+
+// Consulta pública de CNPJ com fontes de reserva (cada uma tem limite de uso)
+async function buscarCnpj(cnpj) {
+  const fontes = [
+    async () => { const r = await fetch('https://brasilapi.com.br/api/cnpj/v1/' + cnpj, { cf: { cacheTtl: 2592000, cacheEverything: true } }); if (!r.ok) return null; const j = await r.json();
+      return { razao_social: j.razao_social || '', nome_fantasia: j.nome_fantasia || '', municipio: j.municipio || '', uf: j.uf || '' }; },
+    async () => { const r = await fetch('https://publica.cnpj.ws/cnpj/' + cnpj, { cf: { cacheTtl: 2592000, cacheEverything: true } }); if (!r.ok) return null; const j = await r.json(); const e = j.estabelecimento || {};
+      return { razao_social: j.razao_social || '', nome_fantasia: e.nome_fantasia || '', municipio: (e.cidade && e.cidade.nome) || '', uf: (e.estado && e.estado.sigla) || '' }; },
+    async () => { const r = await fetch('https://receitaws.com.br/v1/cnpj/' + cnpj, { cf: { cacheTtl: 2592000, cacheEverything: true } }); if (!r.ok) return null; const j = await r.json(); if (j.status === 'ERROR') return null;
+      return { razao_social: j.nome || '', nome_fantasia: j.fantasia || '', municipio: j.municipio || '', uf: j.uf || '' }; },
+  ];
+  for (const f of fontes) { try { const d = await f(); if (d && (d.razao_social || d.nome_fantasia)) return d; } catch (e) {} }
+  return null;
+}
 
 /* ----------------------------- SSW ----------------------------- */
 
