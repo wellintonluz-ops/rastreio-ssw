@@ -407,13 +407,15 @@ async function carregarBase() {
   if (unsubBase) unsubBase();
   const desde = firebase.firestore.Timestamp.fromMillis(Math.max(0, maxTs - 60000));
   await new Promise((resolve) => {
-    let ok = false; const pronto = () => { if (!ok) { ok = true; resolve(); } };
+    let ok = false, jaConfirmou = false; const pronto = () => { if (!ok) { ok = true; resolve(); } };
     setTimeout(pronto, 15000);
-    unsubBase = col.where('atualizadoEm', '>', desde).onSnapshot((snap) => {
+    // includeMetadataChanges: avisa quando o servidor confirma, mesmo sem nenhuma mudança desde a última visita
+    unsubBase = col.where('atualizadoEm', '>', desde).onSnapshot({ includeMetadataChanges: true }, (snap) => {
       let mudou = false;
       snap.docChanges().forEach((ch) => { if (ch.type !== 'removed') { aplicarBalde(ch.doc); mudou = true; } });
       if (!snap.metadata.fromCache) { baseCarregada = true; pronto(); }
-      if (mudou || baseCarregada) { reconstruirLista(); render(); if (detalheId && itensPorId.has(detalheId)) abrirDetalhe(detalheId, false); }
+      const confirmouAgora = !snap.metadata.fromCache && !jaConfirmou; if (confirmouAgora) jaConfirmou = true;
+      if (mudou || confirmouAgora) { reconstruirLista(); render(); if (detalheId && itensPorId.has(detalheId)) abrirDetalhe(detalheId, false); }
       atualizarStatusBase();
     }, (err) => { console.error('[Base]', err); atualizarStatusBase('erro', err.message); pronto(); });
   });
