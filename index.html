@@ -107,7 +107,7 @@
             <tr>
               <th class="text-left px-2 py-2 sortable" data-sort="nf">NF / Pedido</th>
               <th class="text-left px-2 py-2 sortable" data-sort="cliente">Cliente / Destino</th>
-              <th class="text-left px-2 py-2 sortable" data-sort="status">Status</th>
+              <th class="text-left px-2 py-2 sortable" data-sort="status">Status / Transportadora</th>
               <th class="text-left px-2 py-2 sortable" data-sort="ultPendData" title="Última ocorrência de problema (ausente, recusa, endereço, avaria…), mesmo que já tenha sido resolvida">Última pendência</th>
               <th class="text-left px-2 py-2 sortable" data-sort="ultData">Última ocorrência</th>
               <th class="text-left px-2 py-2 sortable" data-sort="prevISO" title="Previsão de entrega (SSW ou dPrevEntrega do XML)">Previsão</th>
@@ -342,6 +342,32 @@ function aplicarBalde(doc) {
 }
 function reconstruirLista() { itens = Array.from(itensPorId.values()); }
 
+/* --- Nomes das transportadoras (webservice manda só o CNPJ) ---
+   Tabela em rastreio_config/transportadoras: 1 leitura ao abrir; CNPJ novo = 1 consulta + 1 gravação. */
+let nomesTransp = {};
+async function carregarTransportadoras() {
+  try { const d = await db.collection(COL_CONFIG).doc('transportadoras').get(); nomesTransp = (d.exists && d.get('nomes')) || {}; } catch (e) { console.warn(e); }
+}
+async function completarTransportadoras() {
+  const faltam = [...new Set(itens.map((i) => i.cnpjTransp).filter((c) => c && !nomesTransp[c]))].slice(0, 20);
+  if (!faltam.length) return;
+  const novos = {};
+  for (const c of faltam) {
+    try {
+      const j = await chamarWorker('/transportadora?cnpj=' + c);
+      const nome = (j.nome_fantasia || j.razao_social || '').trim();
+      if (nome) novos[c] = nome + (j.municipio ? ` (${j.municipio}/${j.uf})` : '');
+    } catch (e) { console.warn('[Transportadora]', c, e.message); }
+  }
+  if (!Object.keys(novos).length) return;
+  Object.assign(nomesTransp, novos);
+  try { await db.collection(COL_CONFIG).doc('transportadoras').set({ nomes: novos }, { merge: true }); } catch (e) { console.warn(e); }
+  render();
+}
+function nomeTransportadora(it) {
+  return it.transportadora || (it.cnpjTransp && nomesTransp[it.cnpjTransp]) || (it.cnpjTransp ? 'CNPJ ' + it.cnpjTransp : '');
+}
+
 async function carregarBase() {
   iniciarBanco();
   atualizarStatusBase('carregando');
@@ -437,6 +463,9 @@ auth.onAuthStateChanged(async (u) => {
     render();
     verificarWorker();
     await carregarBase();
+    await carregarTransportadoras();
+    render();
+    completarTransportadoras();
     sincronizarOcorrencias();
     clearInterval(window.__syncT); window.__syncT = setInterval(() => sincronizarOcorrencias(), 120000);
     document.getElementById('statusSync').onclick = () => sincronizarOcorrencias(false);
@@ -876,7 +905,7 @@ async function sincronizarOcorrencias(silencioso = true) {
       if (!j.mais) break;
     }
     ultimaSync = new Date();
-    if (novas) { render(); if (detalheId) abrirDetalhe(detalheId, false); }
+    if (novas) { render(); if (detalheId) abrirDetalhe(detalheId, false); completarTransportadoras(); }
     atualizarStatusSync();
     if (!silencioso || novas) toast(novas ? `${novas} ocorrência(s) nova(s) do SSW` + (nfsNovas ? `, ${nfsNovas} NF(s) adicionada(s)` : '') : 'Nenhuma ocorrência nova do SSW.');
   } catch (e) {
@@ -1017,7 +1046,7 @@ function render() {
     if (parado && !(i.diasParado != null && i.diasParado > parado)) return false;
     if (soPend && !i.ultPendencia) return false;
     if (soAtraso && !(i.atraso > 0)) return false;
-    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, i.transportadora, i.chave].join(' ')).includes(q)) return false;
+    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, nomeTransportadora(i), i.chave].join(' ')).includes(q)) return false;
     return true;
   });
   const { campo, dir } = ordenacao;
@@ -1044,7 +1073,7 @@ function render() {
     return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer align-top" data-id="${i.id}">
       <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
       <td class="px-2 py-2"><div class="truncate" title="${esc(i.cliente)}">${esc(i.cliente)}</div><div class="text-[11px] text-slate-400 truncate">${esc(i.cidadeDestino)}</div></td>
-      <td class="px-2 py-2">${badge(i.status)}</td>
+      <td class="px-2 py-2">${badge(i.status)}${nomeTransportadora(i) ? `<div class="text-[11px] text-slate-400 truncate mt-1" title="${esc(nomeTransportadora(i))}">${esc(nomeTransportadora(i))}</div>` : ''}</td>
       <td class="px-2 py-2">${i.ultPendencia ? `<div class="line-clamp-2 leading-snug ${pendAtual ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-[11px] text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + 'x' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
       <td class="px-2 py-2"><div class="line-clamp-2 leading-snug" title="${esc((i.ultOcorrencia || i.mensagem || '') + (i.ultDescricao ? ' — ' + i.ultDescricao : ''))}">${esc(i.ultOcorrencia || i.mensagem || '')}</div><div class="text-[11px] text-slate-400 truncate" title="${esc(i.ultLocal)}">${fmtData(i.ultData)}${i.ultLocal ? ' · ' + esc(i.ultLocal) : ''}</div></td>
       <td class="px-2 py-2 whitespace-nowrap">${i.prevISO ? `<div class="${i.atraso > 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmtDia(i.prevISO)}</div>${i.atraso > 0 ? `<div class="text-[11px] text-red-500">${i.status === 'entregue' ? 'entregue ' : ''}+${i.atraso}d atraso</div>` : ''}` : ''}</td>
@@ -1142,7 +1171,7 @@ function abrirDetalhe(id, buscar = true) {
   document.getElementById('detStatus').innerHTML = badge(it.status);
   const info = [
     ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], 
-    ['Transportadora (NF)', it.transportadora || (it.cnpjTransp ? 'CNPJ ' + it.cnpjTransp : '')], ['Agendamento', it.agendamento ? fmtData(it.agendamento) : ''], ['Emissão', fmtData(it.emissao)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
+    ['Transportadora', nomeTransportadora(it) + (it.cnpjTransp && !nomeTransportadora(it).includes(it.cnpjTransp) ? ' · CNPJ ' + it.cnpjTransp : '')], ['Agendamento', it.agendamento ? fmtData(it.agendamento) : ''], ['Emissão', fmtData(it.emissao)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
     ['Remetente', it.cabecalho?.remetente], ['Previsão', it.prevISO ? fmtDia(it.prevISO) + (it.atraso > 0 ? ` (${it.atraso}d de atraso)` : '') : ''], ['Recebedor', it.recebedor],
     ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
     ['Dias em trânsito', it.diasTotal != null ? it.diasTotal + ' dia(s)' : ''], ['Consultado em', fmtData(it.consultadoEm)], ['Fonte', it.fonte],
@@ -1199,7 +1228,7 @@ document.getElementById('btnExportar').onclick = () => {
     'NF': i.nf, 'Pedido': i.pedido, 'Chave NF-e': i.chave, 'Cliente': i.cliente, 'Destino': i.cidadeDestino,
     'Status': (STATUS[i.status] || {}).label, 'Última pendência': i.ultPendencia || '', 'Descrição pendência': i.ultPendDescricao || '', 'Data última pendência': fmtData(i.ultPendData), 'Local pendência': i.ultPendLocal || '', 'Qtd. pendências': i.qtdPendencias || 0, 'Última ocorrência': i.ultOcorrencia || i.mensagem || '', 'Descrição': i.ultDescricao || '',
     'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
-    'Transportadora (NF)': i.transportadora || '', 'Emissão': fmtData(i.emissao), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Agendamento': i.agendamento ? fmtData(i.agendamento) : '', 'Comprovante': i.linkComprovante || '', 'Ocorrências recebidas do SSW': i.qtdWS || 0, 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
+    'Transportadora': nomeTransportadora(i), 'CNPJ transportadora': i.cnpjTransp || '', 'Emissão': fmtData(i.emissao), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Agendamento': i.agendamento ? fmtData(i.agendamento) : '', 'Comprovante': i.linkComprovante || '', 'Ocorrências recebidas do SSW': i.qtdWS || 0, 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
   }));
   const ws = XLSX.utils.json_to_sheet(linhas);
   ws['!cols'] = Object.keys(linhas[0]).map((k) => ({ wch: Math.min(45, Math.max(10, k.length + 2, ...linhas.map((l) => String(l[k] ?? '').length))) }));

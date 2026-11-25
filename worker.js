@@ -24,6 +24,7 @@
  *                             transportadoras (EDI SSW2181). Sem login; protegido pelo token da URL.
  *   GET  /ocorrencias?apos_id=N&limite=2000 -> ocorrências recebidas (para o painel, com login)
  *   GET  /ocorrencias?chave=...  (ou nf=...) -> histórico de uma NF
+ *   GET  /transportadora?cnpj=...  -> nome da transportadora (BrasilAPI)
  *
  * Banco: Cloudflare D1, vinculado ao Worker com o nome DB (tabela "ocorrencias").
  *
@@ -87,6 +88,16 @@ export default {
         if (!itens.length) return json({ ok: false, erro: 'Envie { itens: [...] }' }, 400, cors);
         const resultados = await poolMap(itens, 4, (it) => rastrearItem(it, env));
         return json({ ok: true, resultados }, 200, cors);
+      }
+
+      // Nome da transportadora pelo CNPJ (dado público, BrasilAPI) — o painel guarda o resultado no Firebase
+      if (url.pathname === '/transportadora' && request.method === 'GET') {
+        const cnpj = soDigitos(url.searchParams.get('cnpj'));
+        if (cnpj.length !== 14) return json({ ok: false, erro: 'CNPJ inválido' }, 400, cors);
+        const r = await fetch('https://brasilapi.com.br/api/cnpj/v1/' + cnpj, { cf: { cacheTtl: 2592000, cacheEverything: true } });
+        if (!r.ok) return json({ ok: false, erro: 'CNPJ não encontrado (' + r.status + ')' }, 200, cors);
+        const j = await r.json();
+        return json({ ok: true, cnpj, razao_social: j.razao_social || '', nome_fantasia: j.nome_fantasia || '', municipio: j.municipio || '', uf: j.uf || '' }, 200, cors);
       }
 
       if (url.pathname === '/ocorrencias' && request.method === 'GET') {
