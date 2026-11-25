@@ -84,6 +84,11 @@
     <section class="bg-white rounded-xl shadow-sm">
       <div class="p-4 flex flex-wrap gap-3 items-center border-b border-slate-100">
         <input id="busca" type="search" placeholder="Buscar NF, pedido, cliente, cidade, ocorrência…" class="flex-1 min-w-[240px] border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <label class="text-sm text-slate-600 flex items-center gap-2" title="Quais meses carregar na tela. A base guarda todo o histórico; nada é apagado.">Período
+          <select id="filtroPeriodo" class="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
+            <option value="1">Mês atual</option><option value="3">Últimos 3 meses</option><option value="6">Últimos 6 meses</option><option value="12">Últimos 12 meses</option><option value="0">Todo o histórico</option>
+          </select>
+        </label>
         <label class="text-sm text-slate-600 flex items-center gap-2">Parado há mais de
           <select id="filtroParado" class="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
             <option value="0">—</option><option value="2">2 dias</option><option value="3">3 dias</option><option value="5">5 dias</option><option value="7">7 dias</option>
@@ -119,7 +124,7 @@
         </div>
       </div>
     </section>
-    <p class="text-xs text-slate-400 text-center">Base compartilhada no Firebase (acesso restrito @grupotbx.com.br). Dados de rastreamento: WebAPI SSW e webservice SSW2181.</p>
+    <p class="text-xs text-slate-400 text-center">Base compartilhada no Firebase com todo o histórico (acesso restrito @grupotbx.com.br). Dados de rastreamento: WebAPI SSW e webservice SSW2181.</p>
   </main>
 </div>
 
@@ -253,10 +258,14 @@ function workerUrl() { try { const w = (localStorage.getItem(LS_WORKER) || WORKE
      pessoas importando ao mesmo tempo.
    - Gravar = 1 operação por balde alterado (só os campos que mudaram).
    - Ler = cache local do navegador (grátis) + só os baldes alterados desde a última visita.
-   - Ocorrências do webservice SSW: só 1 navegador grava cada lote (cursor compartilhado).    */
+   - Ocorrências do webservice SSW: só 1 navegador grava cada lote (cursor compartilhado).
+   - Nada é apagado: o histórico fica guardado (base para o OTIF).                              */
 const COL_BALDES = 'rastreio_baldes', COL_IMPORT = 'rastreio_importacoes', COL_CONFIG = 'rastreio_config';
 const BALDES_POR_MES = 100;
-const MESES_RETENCAO = 3; // mês atual + 3 anteriores (≈ 90–120 dias)
+// Nada é apagado (histórico para OTIF). O período só define o que cada navegador carrega na tela.
+const LS_PERIODO = 'rastreioSSW.v2.periodo';
+let mesesPeriodo = (() => { try { const v = localStorage.getItem(LS_PERIODO); return v === null ? 3 : Number(v); } catch { return 3; } })(); // 0 = tudo
+const IMPORTAR_A_PARTIR_DE = '2026-11-01'; // importação aceita só NFs emitidas a partir desta data
 const CAMPOS_SALVOS = ['nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
   'origem', 'adicionadoEm', 'adicionadoPor', 'status', 'mensagem', 'erroApi', 'ultOcorrencia', 'ultDescricao', 'ultData', 'ultLocal',
   'ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal', 'qtdPendencias', 'recebedor', 'agendamento', 'linkComprovante',
@@ -278,7 +287,27 @@ function mesDoItem(it) {
   return (it.adicionadoEm || new Date().toISOString()).slice(0, 7).replace('-', '');
 }
 function baldeDoItem(it) { return it._balde || (it._balde = mesDoItem(it) + '-' + String(fnv(it.id) % BALDES_POR_MES).padStart(2, '0')); }
-function mesCorte() { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - MESES_RETENCAO); return d.toISOString().slice(0, 7).replace('-', ''); }
+function mesCorte() {
+  if (!mesesPeriodo) return '000000';
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - (mesesPeriodo - 1));
+  return d.toISOString().slice(0, 7).replace('-', '');
+}
+function emitidaAntesDoInicio(it) {
+  const ch = soDig(it.chave);
+  const mes = ch.length === 44 ? '20' + ch.slice(2, 4) + '-' + ch.slice(4, 6) : (it.emissao || '').slice(0, 7);
+  return !!mes && mes < IMPORTAR_A_PARTIR_DE.slice(0, 7) || (!!it.emissao && it.emissao.slice(0, 10) < IMPORTAR_A_PARTIR_DE);
+}
+// Troca de período: relê do cache do navegador (não conta leitura no Firebase)
+async function mudarPeriodo(meses) {
+  mesesPeriodo = meses;
+  try { localStorage.setItem(LS_PERIODO, String(meses)); } catch {}
+  itensPorId.clear();
+  try {
+    const cache = await db.collection(COL_BALDES).get({ source: 'cache' });
+    cache.docs.forEach(aplicarBalde);
+  } catch (e) { console.warn(e); }
+  reconstruirLista(); pagina = 1; render(); atualizarStatusBase();
+}
 function resumo(it) { const r = {}; for (const c of CAMPOS_SALVOS) { const v = it[c]; if (v !== undefined && v !== null && v !== '') r[c] = v; } return r; }
 function diferenca(antes, depois) {
   const d = {}; const del = firebase.firestore.FieldValue.delete();
@@ -338,7 +367,6 @@ async function carregarBase() {
       atualizarStatusBase();
     }, (err) => { console.error('[Base]', err); atualizarStatusBase('erro', err.message); pronto(); });
   });
-  limpezaPeriodica();
 }
 
 // Grava só o que mudou: 1 operação por balde. Chamado com atraso para juntar várias mudanças.
@@ -395,19 +423,6 @@ function atualizarStatusBase(estado, msg) {
   el.textContent = `Base: ${itens.length.toLocaleString('pt-BR')} NFs` + (baseCarregada ? '' : ' (cache)');
   el.title = 'Base compartilhada no Firebase. Só os dados alterados são lidos/gravados.';
   el.className = base + 'bg-emerald-500/20 text-emerald-300';
-}
-// Retenção (LGPD): 1x por dia, apaga baldes de meses fora do período
-async function limpezaPeriodica() {
-  try {
-    const hoje = new Date().toISOString().slice(0, 10);
-    const ref = db.collection(COL_CONFIG).doc('manutencao');
-    const doc = await ref.get();
-    if (doc.exists && doc.get('ultimaLimpeza') === hoje) return;
-    await ref.set({ ultimaLimpeza: hoje, por: usuario.email }, { merge: true });
-    const velhos = await db.collection(COL_BALDES).where('mes', '<', mesCorte()).limit(300).get();
-    if (velhos.empty) return;
-    const batch = db.batch(); velhos.docs.forEach((d) => batch.delete(d.ref)); await batch.commit();
-  } catch (e) { console.warn('[Limpeza]', e); }
 }
 
 /* ===================== LOGIN ===================== */
@@ -490,11 +505,12 @@ function novoItem(dados) {
 
 // Importa sem duplicar: mesma chave = mesmo registro. Se algum dado mudou, atualiza só ele.
 function adicionarItens(lista, origem = 'manual') {
-  let novos = 0, atualizados = 0, iguais = 0, repetidosNoArquivo = 0, convertidos = 0;
+  let novos = 0, atualizados = 0, iguais = 0, repetidosNoArquivo = 0, convertidos = 0, foraDoPeriodo = 0;
   const ids = [], vistos = new Set();
   for (const d of lista) {
     const cand = novoItem({ ...d, origem });
     if (!cand.id) continue;
+    if (origem !== 'ssw' && emitidaAntesDoInicio(cand)) { foraDoPeriodo++; continue; }
     if (vistos.has(cand.id)) { repetidosNoArquivo++; continue; }
     vistos.add(cand.id);
     let ex = itensPorId.get(cand.id);
@@ -518,16 +534,17 @@ function adicionarItens(lista, origem = 'manual') {
     }
   }
   reconstruirLista(); salvar(); render();
-  return { ids, novos, atualizados, iguais, repetidosNoArquivo, convertidos };
+  return { ids, novos, atualizados, iguais, repetidosNoArquivo, convertidos, foraDoPeriodo };
 }
 function resumoImportacao(r) {
   return `${r.novos} NF(s) nova(s)` + (r.atualizados ? `, ${r.atualizados} já existiam e foram atualizadas` : '') +
-    (r.iguais ? `, ${r.iguais} já existiam sem mudança (não duplicadas)` : '') + (r.repetidosNoArquivo ? `, ${r.repetidosNoArquivo} repetida(s) no próprio arquivo` : '');
+    (r.iguais ? `, ${r.iguais} já existiam sem mudança (não duplicadas)` : '') + (r.repetidosNoArquivo ? `, ${r.repetidosNoArquivo} repetida(s) no próprio arquivo` : '') +
+    (r.foraDoPeriodo ? `, ${r.foraDoPeriodo} ignorada(s) por serem emitidas antes de ${IMPORTAR_A_PARTIR_DE.split('-').reverse().join('/')}` : '');
 }
 async function registrarImportacao(arquivos, lidas, r) {
   try {
     await db.collection(COL_IMPORT).add({ em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email,
-      arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo });
+      arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo, foraDoPeriodo: r.foraDoPeriodo || 0 });
   } catch (e) { console.warn('[Importação] não registrou o histórico', e); }
 }
 
@@ -1063,6 +1080,8 @@ document.getElementById('busca').oninput = renderPag1;
 document.getElementById('filtroParado').onchange = renderPag1;
 document.getElementById('filtroPend').onchange = renderPag1;
 document.getElementById('filtroAtraso').onchange = renderPag1;
+document.getElementById('filtroPeriodo').value = String(mesesPeriodo);
+document.getElementById('filtroPeriodo').onchange = (e) => mudarPeriodo(Number(e.target.value));
 
 function renderPaginacao(total, totalPaginas, ini) {
   const el = document.getElementById('paginacao');

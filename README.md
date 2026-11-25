@@ -11,8 +11,7 @@ Elas ficam no banco D1 `rastreio-ssw` (esquema em `schema.sql`) e o painel sincr
 
 ## LGPD
 - CPF do cliente e documento do recebedor não são guardados.
-- Ocorrências com mais de 90 dias são apagadas diariamente (gatilho Cron do Worker).
-- O painel remove da lista NFs entregues há mais de 90 dias.
+- Histórico mantido (base para o OTIF): nada é apagado automaticamente. O painel só escolhe quais meses carregar na tela.
 - Acesso restrito a contas @grupotbx.com.br.
 
 ## Base no Firebase (projeto "Rastreio SSW", id teste-30bbd)
