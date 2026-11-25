@@ -356,11 +356,8 @@ async function completarTransportadoras() {
   if (!faltam.length) return;
   const novos = {};
   for (const c of faltam) {
-    try {
-      const j = await chamarWorker('/transportadora?cnpj=' + c);
-      const nome = (j.nome_fantasia || j.razao_social || '').trim();
-      if (nome) novos[c] = nome + (j.municipio ? ` (${j.municipio}/${j.uf})` : '');
-    } catch (e) { console.warn('[Transportadora]', c, e.message); }
+    const d = await consultarCnpj(c);
+    if (d) novos[c] = d;
   }
   if (!Object.keys(novos).length) return;
   Object.assign(nomesTransp, novos);
@@ -376,6 +373,20 @@ async function renomearTransportadora(cnpj) {
   nomesTransp[cnpj] = limpo || atual;
   try { await db.collection(COL_CONFIG).doc('transportadoras').set({ nomes: { [cnpj]: nomesTransp[cnpj] } }, { merge: true }); } catch (e) { toast('Erro ao salvar: ' + e.message); }
   render(); if (detalheId) abrirDetalhe(detalheId, false);
+}
+// CNPJ de empresa é dado público: consulta direto do navegador (CNPJ.ws, BrasilAPI) e, se falhar, pelo Worker
+async function consultarCnpj(c) {
+  const montar = (fantasia, razao, cidade, uf) => { const nome = (fantasia || razao || '').trim(); return nome ? nome + (cidade ? ` (${cidade}/${uf})` : '') : ''; };
+  try {
+    const r = await fetch('https://publica.cnpj.ws/cnpj/' + c);
+    if (r.ok) { const j = await r.json(); const e = j.estabelecimento || {}; const n = montar(e.nome_fantasia, j.razao_social, e.cidade && e.cidade.nome, e.estado && e.estado.sigla); if (n) return n; }
+  } catch (e) {}
+  try {
+    const r = await fetch('https://brasilapi.com.br/api/cnpj/v1/' + c);
+    if (r.ok) { const j = await r.json(); const n = montar(j.nome_fantasia, j.razao_social, j.municipio, j.uf); if (n) return n; }
+  } catch (e) {}
+  try { const j = await chamarWorker('/transportadora?cnpj=' + c); const n = montar(j.nome_fantasia, j.razao_social, j.municipio, j.uf); if (n) return n; } catch (e) {}
+  return '';
 }
 function nomeTransportadora(it) {
   return it.transportadora || (it.cnpjTransp && nomesTransp[it.cnpjTransp]) || (it.cnpjTransp ? 'CNPJ ' + it.cnpjTransp : '');
