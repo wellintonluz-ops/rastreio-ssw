@@ -23,6 +23,7 @@
  *   POST /ssw/ocorrencias/<token>  -> recebe as ocorrências enviadas pelo SSW das
  *                             transportadoras (EDI SSW2181). Sem login; protegido pelo token da URL.
  *   GET  /ocorrencias?apos_id=N&limite=2000 -> ocorrências recebidas (para o painel, com login)
+ *   GET  /ocorrencias?chave=...  (ou nf=...) -> histórico de uma NF
  *
  * Banco: Cloudflare D1, vinculado ao Worker com o nome DB (tabela "ocorrencias").
  *
@@ -91,10 +92,19 @@ export default {
 
       if (url.pathname === '/ocorrencias' && request.method === 'GET') {
         if (!env.DB) return json({ ok: false, erro: 'Banco D1 (DB) não vinculado ao Worker.' }, 500, cors);
+        const campos = 'id, recebido_em, cnpj_transp, cnpj_pagador, nf, serie, chave, pedido, cte_numero, cte_chave, data_evento, codigo, descricao, complemento, recebedor, latitude, longitude, agendamento, link_comprovante, tem_imagem';
+        // histórico de UMA NF (detalhe do painel)
+        const chaveQ = soDigitos(url.searchParams.get('chave')), nfQ = Number(soDigitos(url.searchParams.get('nf'))) || 0;
+        if (chaveQ.length === 44 || nfQ) {
+          const { results } = chaveQ.length === 44
+            ? await env.DB.prepare(`SELECT ${campos} FROM ocorrencias WHERE chave = ? OR (chave = '' AND nf = ?) ORDER BY data_evento LIMIT 500`).bind(chaveQ, nfQ).all()
+            : await env.DB.prepare(`SELECT ${campos} FROM ocorrencias WHERE nf = ? ORDER BY data_evento LIMIT 500`).bind(nfQ).all();
+          return json({ ok: true, ocorrencias: results }, 200, cors);
+        }
         const aposId = Math.max(0, Number(url.searchParams.get('apos_id')) || 0);
         const limite = Math.min(5000, Math.max(1, Number(url.searchParams.get('limite')) || 2000));
         const { results } = await env.DB.prepare(
-          'SELECT id, recebido_em, cnpj_transp, cnpj_pagador, nf, serie, chave, pedido, cte_numero, cte_chave, data_evento, codigo, descricao, complemento, recebedor, doc_recebedor, latitude, longitude, agendamento, link_comprovante, tem_imagem FROM ocorrencias WHERE id > ? ORDER BY id LIMIT ?'
+          `SELECT ${campos} FROM ocorrencias WHERE id > ? ORDER BY id LIMIT ?`
         ).bind(aposId, limite).all();
         return json({ ok: true, ocorrencias: results, ultimo_id: results.length ? results[results.length - 1].id : aposId, mais: results.length === limite }, 200, cors);
       }
@@ -171,10 +181,22 @@ async function chamarSSW(rota, body) {
     const txt = await r.text();
     let j;
     try { j = JSON.parse(txt); } catch { j = { success: false, message: 'Resposta inesperada da SSW: ' + txt.slice(0, 200) }; }
-    return { status: r.status, json: j };
+    return { status: r.status, json: limparDocumentos(j) };
   } catch (e) {
     return { status: 0, json: { success: false, message: 'Falha ao acessar SSW: ' + e.message } };
   }
+}
+
+// LGPD: tira CPF/CNPJ/RG de pessoas (recebedor, destinatário) da resposta antes de ir ao navegador
+const CAMPOS_DOC = /^(cpf|rg|cpf_cnpj|cpf_destinatario|cpf_recebedor|rg_recebedor|doc_recebedor|nro_doc_recebedor|documento_recebedor|nro_documento_recebedor)$/i;
+function limparDocumentos(o) {
+  if (Array.isArray(o)) return o.map(limparDocumentos);
+  if (o && typeof o === 'object') {
+    const n = {};
+    for (const [k, v] of Object.entries(o)) { if (CAMPOS_DOC.test(k) && (v == null || typeof v !== 'object')) continue; n[k] = limparDocumentos(v); }
+    return n;
+  }
+  return o;
 }
 
 /* ------------- Webservice de ocorrências (SSW2181) -------------- */

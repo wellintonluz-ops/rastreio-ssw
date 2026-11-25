@@ -9,6 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 <style>
   body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   .chip { transition: all .15s; }
@@ -47,6 +48,7 @@
       </div>
       <div class="ml-auto flex items-center gap-2 text-sm">
         <span id="statusWorker" class="px-2 py-1 rounded bg-slate-800 text-slate-300 text-xs">Worker: verificando…</span>
+        <span id="statusBase" class="px-2 py-1 rounded bg-slate-800 text-slate-300 text-xs" title="Base compartilhada no Firebase">Base: carregando…</span>
         <span id="statusSync" class="px-2 py-1 rounded bg-slate-800 text-slate-300 text-xs cursor-pointer">Ocorrências SSW: —</span>
         <button id="btnConfig" class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700">⚙️ Configurações</button>
         <span id="userEmail" class="text-slate-300 hidden md:inline"></span>
@@ -68,10 +70,7 @@
       <button id="btnAtualizarPend" class="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium">⟳ Atualizar não entregues</button>
       <button id="btnAtualizarTodas" class="px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 font-medium">⟳ Atualizar todas</button>
       <button id="btnExportar" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⬇ Exportar Excel</button>
-      <div class="ml-auto flex items-center gap-2">
-        <button id="btnLimparEntregues" class="px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-100">Remover entregues</button>
-        <button id="btnLimparTudo" class="px-3 py-2 rounded-lg text-sm text-red-600 hover:bg-red-50">Limpar lista</button>
-      </div>
+
       <div id="progresso" class="hidden w-full mt-2">
         <div class="flex justify-between text-xs text-slate-500 mb-1"><span id="progTxt">Consultando…</span><span id="progPct">0%</span></div>
         <div class="h-2 bg-slate-100 rounded-full overflow-hidden"><div id="progBar" class="h-full bg-emerald-500 w-0 transition-all"></div></div>
@@ -120,7 +119,7 @@
         </div>
       </div>
     </section>
-    <p class="text-xs text-slate-400 text-center">A lista fica salva neste navegador. Dados de rastreamento: WebAPI SSW.</p>
+    <p class="text-xs text-slate-400 text-center">Base compartilhada no Firebase (acesso restrito @grupotbx.com.br). Dados de rastreamento: WebAPI SSW e webservice SSW2181.</p>
   </main>
 </div>
 
@@ -228,7 +227,8 @@ const STATUS = {
 };
 
 /* ===================== ESTADO ===================== */
-let itens = carregar();
+let itens = [];                 // NFs em memória (espelho da base)
+const itensPorId = new Map();   // id -> item
 let filtroStatus = '';
 const POR_PAGINA = 50;
 let pagina = 1;
@@ -237,26 +237,178 @@ let usuario = null;
 let detalheId = null;
 let consultando = false;
 
-function carregar() {
-  let lista = [];
-  try { lista = JSON.parse(localStorage.getItem(LS_DADOS)) || []; } catch { return []; }
-  // LGPD: retenção — remove NFs entregues há mais de 90 dias e qualquer NF com mais de 180 dias na lista
-  const agora = Date.now(), DIA = 86400000;
-  const antes = lista.length;
-  lista = lista.filter((i) => {
-    const ref = Date.parse(i.ultData || i.adicionadoEm || '') || agora;
-    const add = Date.parse(i.adicionadoEm || '') || agora;
-    if (i.status === 'entregue' && agora - ref > 90 * DIA) return false;
-    if (agora - add > 180 * DIA && agora - ref > 90 * DIA) return false;
-    return true;
-  });
-  let mudou = false;
-  lista.forEach((i) => { if ('resposta' in i || 'docDest' in i || 'cpf' in i) mudou = true; delete i.resposta; delete i.docDest; delete i.cpf; });
-  if (mudou || lista.length !== antes) { try { localStorage.setItem(LS_DADOS, JSON.stringify(lista)); } catch {} }
-  return lista;
-}
-function salvar() { try { localStorage.setItem(LS_DADOS, JSON.stringify(itens)); } catch (e) { toast('Não foi possível salvar no navegador: ' + e.message); } }
+// Começo do zero: apaga o que a versão antiga guardava no navegador (1x)
+try {
+  if (!localStorage.getItem('rastreioSSW.v2.zerado')) {
+    Object.keys(localStorage).filter((k) => k.startsWith('rastreioSSW.v1.')).forEach((k) => localStorage.removeItem(k));
+    localStorage.setItem('rastreioSSW.v2.zerado', new Date().toISOString());
+  }
+} catch {}
 function workerUrl() { try { const w = (localStorage.getItem(LS_WORKER) || WORKER_PADRAO).replace(/\/+$/, ''); return w === WORKER_ANTIGO ? WORKER_PADRAO : w; } catch { return WORKER_PADRAO; } }
+
+/* ===================== BANCO (Firestore) =====================
+   Economia de leituras/gravações:
+   - As NFs ficam agrupadas em "baldes" (1 documento = até ~600 NFs). O balde de cada NF é
+     sempre o mesmo (mês de emissão da chave + hash da chave) → nunca duplica, nem com duas
+     pessoas importando ao mesmo tempo.
+   - Gravar = 1 operação por balde alterado (só os campos que mudaram).
+   - Ler = cache local do navegador (grátis) + só os baldes alterados desde a última visita.
+   - Ocorrências do webservice SSW: só 1 navegador grava cada lote (cursor compartilhado).    */
+const COL_BALDES = 'rastreio_baldes', COL_IMPORT = 'rastreio_importacoes', COL_CONFIG = 'rastreio_config';
+const BALDES_POR_MES = 100;
+const MESES_RETENCAO = 3; // mês atual + 3 anteriores (≈ 90–120 dias)
+const CAMPOS_SALVOS = ['nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
+  'origem', 'adicionadoEm', 'adicionadoPor', 'status', 'mensagem', 'erroApi', 'ultOcorrencia', 'ultDescricao', 'ultData', 'ultLocal',
+  'ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal', 'qtdPendencias', 'recebedor', 'agendamento', 'linkComprovante',
+  'primData', 'consultadoEm', 'fonte', 'qtdWS', 'cnpjTransp'];
+let db = null, unsubBase = null, baseCarregada = false, adiarGravacao = false, gravacaoT = null, gravando = false;
+const removidosPendentes = new Map(); // id -> baldeId
+
+function fnv(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }
+function idDaNF(d) {
+  const ch = soDig(d.chave);
+  if (ch.length === 44) return ch;
+  if (d.nf) return 'NF' + soDig(d.nf);
+  if (d.pedido) return 'P' + String(d.pedido).replace(/[^A-Za-z0-9_-]/g, '_');
+  return '';
+}
+function mesDoItem(it) {
+  const ch = soDig(it.chave);
+  if (ch.length === 44) return '20' + ch.slice(2, 6);
+  return (it.adicionadoEm || new Date().toISOString()).slice(0, 7).replace('-', '');
+}
+function baldeDoItem(it) { return it._balde || (it._balde = mesDoItem(it) + '-' + String(fnv(it.id) % BALDES_POR_MES).padStart(2, '0')); }
+function mesCorte() { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - MESES_RETENCAO); return d.toISOString().slice(0, 7).replace('-', ''); }
+function resumo(it) { const r = {}; for (const c of CAMPOS_SALVOS) { const v = it[c]; if (v !== undefined && v !== null && v !== '') r[c] = v; } return r; }
+function diferenca(antes, depois) {
+  const d = {}; const del = firebase.firestore.FieldValue.delete();
+  for (const c of CAMPOS_SALVOS) {
+    const a = antes[c], b = depois[c];
+    if (b === undefined) { if (a !== undefined) d[c] = del; }
+    else if (a !== b) d[c] = b;
+  }
+  return d;
+}
+function iniciarBanco() {
+  if (db) return;
+  db = firebase.firestore();
+  try { db.settings({ cacheSizeBytes: firebase.firestore.CACHE_SIZE_UNLIMITED, merge: true }); } catch (e) { console.warn(e); }
+  db.enablePersistence({ synchronizeTabs: true }).catch((e) => console.warn('[Firebase] cache local indisponível:', e.code || e));
+}
+function aplicarBalde(doc) {
+  const dados = doc.data() || {};
+  if ((dados.mes || doc.id.slice(0, 6)) < mesCorte()) return;
+  const nfs = dados.nfs || {};
+  const noBalde = new Set(Object.keys(nfs));
+  for (const [id, r] of Object.entries(nfs)) {
+    if (removidosPendentes.has(id)) continue;
+    let it = itensPorId.get(id);
+    if (!it) { it = { id }; itensPorId.set(id, it); }
+    for (const c of CAMPOS_SALVOS) { if (c in r) it[c] = r[c]; else delete it[c]; }
+    it._balde = doc.id;
+    it._salvo = resumo(it);
+  }
+  // NFs que estavam neste balde e foram removidas por outra pessoa
+  for (const it of itensPorId.values()) if (it._balde === doc.id && it._salvo && !noBalde.has(it.id)) itensPorId.delete(it.id);
+}
+function reconstruirLista() { itens = Array.from(itensPorId.values()); }
+
+async function carregarBase() {
+  iniciarBanco();
+  atualizarStatusBase('carregando');
+  const col = db.collection(COL_BALDES);
+  let maxTs = 0;
+  // 1) o que já está no cache do navegador (não conta leitura)
+  try {
+    const cache = await col.get({ source: 'cache' });
+    cache.docs.forEach((d) => { aplicarBalde(d); const t = d.get('atualizadoEm'); if (t && t.toMillis) maxTs = Math.max(maxTs, t.toMillis()); });
+    reconstruirLista(); render();
+  } catch (e) { console.warn('[Base] sem cache local', e); }
+  // 2) só os baldes alterados desde a última visita (e, depois, as mudanças em tempo real)
+  if (unsubBase) unsubBase();
+  const desde = firebase.firestore.Timestamp.fromMillis(Math.max(0, maxTs - 60000));
+  await new Promise((resolve) => {
+    let ok = false; const pronto = () => { if (!ok) { ok = true; resolve(); } };
+    setTimeout(pronto, 15000);
+    unsubBase = col.where('atualizadoEm', '>', desde).onSnapshot((snap) => {
+      let mudou = false;
+      snap.docChanges().forEach((ch) => { if (ch.type !== 'removed') { aplicarBalde(ch.doc); mudou = true; } });
+      if (!snap.metadata.fromCache) { baseCarregada = true; pronto(); }
+      if (mudou || baseCarregada) { reconstruirLista(); render(); if (detalheId && itensPorId.has(detalheId)) abrirDetalhe(detalheId, false); }
+      atualizarStatusBase();
+    }, (err) => { console.error('[Base]', err); atualizarStatusBase('erro', err.message); pronto(); });
+  });
+  limpezaPeriodica();
+}
+
+// Grava só o que mudou: 1 operação por balde. Chamado com atraso para juntar várias mudanças.
+function salvar() { clearTimeout(gravacaoT); if (!adiarGravacao) gravacaoT = setTimeout(gravarAlteracoes, 1200); }
+async function gravarAlteracoes() {
+  if (!db || !usuario) return;
+  if (gravando) { salvar(); return; }
+  gravando = true;
+  const porBalde = new Map();
+  for (const it of itens) {
+    const r = resumo(it);
+    const d = diferenca(it._salvo || {}, r);
+    if (!Object.keys(d).length) continue;
+    const b = baldeDoItem(it);
+    if (!porBalde.has(b)) porBalde.set(b, {});
+    porBalde.get(b)[it.id] = it._salvo ? d : r;
+    it._salvo = r;
+  }
+  const remocoes = new Map(removidosPendentes); removidosPendentes.clear();
+  if (!porBalde.size && !remocoes.size) { gravando = false; return; }
+  atualizarStatusBase('salvando');
+  try {
+    const ts = firebase.firestore.FieldValue.serverTimestamp();
+    const ops = [];
+    for (const [b, nfs] of porBalde) ops.push((batch) => batch.set(db.collection(COL_BALDES).doc(b), { nfs, mes: b.slice(0, 6), atualizadoEm: ts }, { merge: true }));
+    for (const [id, b] of remocoes) ops.push((batch) => batch.update(db.collection(COL_BALDES).doc(b), { ['nfs.' + id]: firebase.firestore.FieldValue.delete(), atualizadoEm: ts }));
+    for (let i = 0; i < ops.length; i += 400) {
+      const batch = db.batch();
+      ops.slice(i, i + 400).forEach((f) => f(batch));
+      await batch.commit();
+    }
+    atualizarStatusBase();
+  } catch (e) {
+    console.error('[Base] erro ao gravar', e);
+    // volta o estado para tentar de novo depois
+    for (const [b, nfs] of porBalde) for (const id of Object.keys(nfs)) { const it = itensPorId.get(id); if (it) it._salvo = null; }
+    for (const [id, b] of remocoes) removidosPendentes.set(id, b);
+    atualizarStatusBase('erro', e.message);
+    toast('Não consegui gravar no Firebase: ' + e.message + '. Vou tentar de novo.');
+    setTimeout(salvar, 30000);
+  } finally { gravando = false; }
+}
+function removerItem(id) {
+  const it = itensPorId.get(id); if (!it) return;
+  if (it._salvo) removidosPendentes.set(id, baldeDoItem(it));
+  itensPorId.delete(id); reconstruirLista(); render(); salvar();
+}
+function atualizarStatusBase(estado, msg) {
+  const el = document.getElementById('statusBase'); if (!el) return;
+  const base = 'px-2 py-1 rounded text-xs ';
+  if (estado === 'carregando') { el.textContent = 'Base: carregando…'; el.className = base + 'bg-slate-800 text-slate-300'; return; }
+  if (estado === 'salvando') { el.textContent = 'Base: salvando…'; el.className = base + 'bg-blue-500/20 text-blue-300'; return; }
+  if (estado === 'erro') { el.textContent = 'Base: erro'; el.title = msg || ''; el.className = base + 'bg-red-500/20 text-red-300'; return; }
+  el.textContent = `Base: ${itens.length.toLocaleString('pt-BR')} NFs` + (baseCarregada ? '' : ' (cache)');
+  el.title = 'Base compartilhada no Firebase. Só os dados alterados são lidos/gravados.';
+  el.className = base + 'bg-emerald-500/20 text-emerald-300';
+}
+// Retenção (LGPD): 1x por dia, apaga baldes de meses fora do período
+async function limpezaPeriodica() {
+  try {
+    const hoje = new Date().toISOString().slice(0, 10);
+    const ref = db.collection(COL_CONFIG).doc('manutencao');
+    const doc = await ref.get();
+    if (doc.exists && doc.get('ultimaLimpeza') === hoje) return;
+    await ref.set({ ultimaLimpeza: hoje, por: usuario.email }, { merge: true });
+    const velhos = await db.collection(COL_BALDES).where('mes', '<', mesCorte()).limit(300).get();
+    if (velhos.empty) return;
+    const batch = db.batch(); velhos.docs.forEach((d) => batch.delete(d.ref)); await batch.commit();
+  } catch (e) { console.warn('[Limpeza]', e); }
+}
 
 /* ===================== LOGIN ===================== */
 firebase.initializeApp(firebaseConfig);
@@ -267,9 +419,9 @@ auth.onAuthStateChanged(async (u) => {
     document.getElementById('telaLogin').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     document.getElementById('userEmail').textContent = u.email;
-    itens.forEach((i) => { if (!i.eventosApi && i.eventos) recalcular(i); });
     render();
     verificarWorker();
+    await carregarBase();
     sincronizarOcorrencias();
     clearInterval(window.__syncT); window.__syncT = setInterval(() => sincronizarOcorrencias(), 120000);
     document.getElementById('statusSync').onclick = () => sincronizarOcorrencias(false);
@@ -285,7 +437,7 @@ document.getElementById('btnLogin').onclick = async () => {
   p.setCustomParameters({ hd: DOMINIO_PERMITIDO, prompt: 'select_account' });
   try { await auth.signInWithPopup(p); } catch (e) { document.getElementById('msgLogin').textContent = e.message; }
 };
-document.getElementById('btnSair').onclick = () => auth.signOut();
+document.getElementById('btnSair').onclick = () => { if (unsubBase) { unsubBase(); unsubBase = null; } auth.signOut(); };
 
 /* ===================== WORKER ===================== */
 async function chamarWorker(caminho, opts = {}) {
@@ -326,36 +478,57 @@ function soDig(v) { return (v == null ? '' : String(v)).replace(/\D/g, ''); }
 function nfDaChave(ch) { return ch.length === 44 ? String(Number(ch.slice(25, 34))) : ''; }
 function chaveItem(it) { return it.chave || (it.nf ? 'NF' + it.nf : '') || (it.pedido ? 'P' + it.pedido : ''); }
 
+const CAMPOS_IMPORTADOS = ['chave', 'nf', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'emissao', 'transportadora', 'valor'];
 function novoItem(dados) {
-  const it = {
-    id: 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-    nf: '', chave: '', pedido: '', cliente: '', cidadeDestino: '',
-    status: 'pendente', adicionadoEm: new Date().toISOString(), ...dados,
-  };
+  const it = { nf: '', chave: '', pedido: '', cliente: '', cidadeDestino: '', status: 'pendente',
+    adicionadoEm: new Date().toISOString(), adicionadoPor: usuario ? usuario.email : '', ...dados };
   if (!it.nf && it.chave) it.nf = nfDaChave(it.chave);
   delete it.cpf; // CPF não é guardado (LGPD: minimização)
+  it.id = idDaNF(it);
   return it;
 }
 
-function adicionarItens(lista) {
-  const existentes = new Map(itens.map((i) => [chaveItem(i), i]));
-  let novos = 0, atualizados = 0;
-  const ids = [];
+// Importa sem duplicar: mesma chave = mesmo registro. Se algum dado mudou, atualiza só ele.
+function adicionarItens(lista, origem = 'manual') {
+  let novos = 0, atualizados = 0, iguais = 0, repetidosNoArquivo = 0, convertidos = 0;
+  const ids = [], vistos = new Set();
   for (const d of lista) {
-    const cand = novoItem(d);
-    const k = chaveItem(cand);
-    if (!k) continue;
-    const ex = existentes.get(k) || (cand.nf && existentes.get('NF' + cand.nf));
+    const cand = novoItem({ ...d, origem });
+    if (!cand.id) continue;
+    if (vistos.has(cand.id)) { repetidosNoArquivo++; continue; }
+    vistos.add(cand.id);
+    let ex = itensPorId.get(cand.id);
+    // NF cadastrada antes só pelo número e agora chegou com a chave: vira um registro só
+    if (!ex && cand.chave && itensPorId.has('NF' + cand.nf)) {
+      const antigo = itensPorId.get('NF' + cand.nf);
+      removerItem(antigo.id);
+      ex = { ...antigo, id: cand.id, _salvo: null, _balde: undefined };
+      itensPorId.set(cand.id, ex); convertidos++;
+    }
     if (ex) {
-      for (const c of ['chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'emissao', 'transportadora', 'valor']) if (cand[c] && !ex[c]) ex[c] = cand[c];
-      atualizados++; ids.push(ex.id);
+      let mudou = false;
+      for (const c of CAMPOS_IMPORTADOS) {
+        const v = cand[c];
+        if (v !== undefined && v !== null && v !== '' && String(v) !== String(ex[c] ?? '')) { ex[c] = v; mudou = true; }
+      }
+      if (mudou) atualizados++; else iguais++;
+      ids.push(ex.id);
     } else {
-      itens.push(cand); existentes.set(k, cand); novos++; ids.push(cand.id);
+      itensPorId.set(cand.id, cand); novos++; ids.push(cand.id);
     }
   }
-  salvar(); render();
-  toast(`${novos} NF(s) adicionada(s)` + (atualizados ? `, ${atualizados} já estava(m) na lista` : ''));
-  return ids;
+  reconstruirLista(); salvar(); render();
+  return { ids, novos, atualizados, iguais, repetidosNoArquivo, convertidos };
+}
+function resumoImportacao(r) {
+  return `${r.novos} NF(s) nova(s)` + (r.atualizados ? `, ${r.atualizados} já existiam e foram atualizadas` : '') +
+    (r.iguais ? `, ${r.iguais} já existiam sem mudança (não duplicadas)` : '') + (r.repetidosNoArquivo ? `, ${r.repetidosNoArquivo} repetida(s) no próprio arquivo` : '');
+}
+async function registrarImportacao(arquivos, lidas, r) {
+  try {
+    await db.collection(COL_IMPORT).add({ em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email,
+      arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo });
+  } catch (e) { console.warn('[Importação] não registrou o histórico', e); }
 }
 
 function interpretarTexto(txt) {
@@ -465,6 +638,7 @@ async function lerPlanilha(f) {
 async function importarArquivos(arquivos) {
   arquivos = [...arquivos];
   if (!arquivos.length) return;
+  if (!baseCarregada) { toast('Aguarde a base terminar de carregar para importar (evita duplicar).'); return; }
   try {
     const xmlZip = arquivos.filter((f) => /\.(xml|zip)$/i.test(f.name));
     const planilhas = arquivos.filter((f) => /\.(xlsx|xls|csv)$/i.test(f.name));
@@ -477,8 +651,10 @@ async function importarArquivos(arquivos) {
     }
     for (const f of planilhas) { const l = await lerPlanilha(f); lista = lista.concat(l); msg.push(`${l.length} linha(s) de ${f.name}`); }
     if (!lista.length) { toast('Nenhuma NF encontrada nos arquivos.'); return; }
-    const ids = adicionarItens(lista);
-    if (confirm(msg.join('\n') + '\n\nConsultar agora na SSW?')) consultar(ids);
+    const r = adicionarItens(lista, xmlZip.length ? 'xml' : 'planilha');
+    registrarImportacao(arquivos.map((f) => f.name), lista.length, r);
+    const paraConsultar = r.ids.filter((id) => { const it = itensPorId.get(id); return it && it.status !== 'entregue'; });
+    if (confirm(msg.join('\n') + '\n' + resumoImportacao(r) + '.\n\nConsultar agora na SSW as ' + paraConsultar.length + ' NF(s) não entregues?')) consultar(paraConsultar);
   } catch (e) { toast('Erro ao ler arquivo: ' + e.message); }
 }
 
@@ -491,9 +667,10 @@ document.addEventListener('drop', (e) => { if (!usuario) return; e.preventDefaul
 /* ===================== CONSULTA ===================== */
 async function consultar(ids) {
   if (consultando) { toast('Já existe uma consulta em andamento.'); return; }
-  const alvo = itens.filter((i) => ids.includes(i.id));
+  const alvoIds = new Set(ids);
+  const alvo = itens.filter((i) => alvoIds.has(i.id));
   if (!alvo.length) { toast('Nada para consultar.'); return; }
-  consultando = true;
+  consultando = true; adiarGravacao = true;
   const prog = document.getElementById('progresso'); prog.classList.remove('hidden');
   let feitos = 0, erroGeral = null;
   atualizarProgresso(0, alvo.length);
@@ -508,15 +685,17 @@ async function consultar(ids) {
         for (const r of j.resultados || []) aplicarResultado(r);
       } catch (e) {
         erroGeral = e.message;
-        for (const it of lote) { it.status = 'erro'; it.mensagem = e.message; it.consultadoEm = new Date().toISOString(); }
+        for (const it of lote) { if (!it.ultData) { it.status = 'erro'; it.mensagem = e.message; } }
         if (/login|sess|token|restrito/i.test(e.message)) break;
       }
       feitos += lote.length;
       atualizarProgresso(feitos, alvo.length);
-      salvar(); render();
+      render();
+      if ((i / LOTE) % 40 === 39) await gravarAlteracoes(); // a cada ~480 NFs, grava o que já foi consultado
     }
   } finally {
-    consultando = false;
+    consultando = false; adiarGravacao = false;
+    await gravarAlteracoes();
     setTimeout(() => prog.classList.add('hidden'), 800);
     if (detalheId) abrirDetalhe(detalheId);
     toast(erroGeral ? 'Consulta terminou com erros: ' + erroGeral : 'Consulta concluída.');
@@ -530,14 +709,15 @@ function atualizarProgresso(f, t) {
 }
 
 function aplicarResultado(r) {
-  const it = itens.find((i) => i.id === r.id);
+  const it = itensPorId.get(r.id);
   if (!it) return;
+  const anterior = { ...it };
   it.consultadoEm = new Date().toISOString();
   it.fonte = r.fonte || '';
   it.tentativas = r.tentativas || [];
   if (!r.ok) {
     it.erroApi = r.mensagem || 'Não localizado';
-    recalcular(it);
+    recalcular(it); preservarMaisRecente(it, anterior);
     return;
   }
   it.erroApi = '';
@@ -549,7 +729,38 @@ function aplicarResultado(r) {
   if (!it.nf && p.cabecalho.nro_nf) it.nf = String(p.cabecalho.nro_nf);
   it.previsaoSSW = p.cabecalho.previsao || '';
   if (!p.eventos.length && !(it.ocorrenciasWS || []).length) it.erroApi = (r.resposta && r.resposta.message) || 'Sem ocorrências';
-  recalcular(it);
+  recalcular(it); preservarMaisRecente(it, anterior);
+}
+// O resumo salvo pode ter ocorrências do webservice que não estão em memória: mantém o que for mais recente
+function preservarMaisRecente(it, ant) {
+  if (ant.ultData && (!it.ultData || ant.ultData > it.ultData)) {
+    for (const c of ['ultOcorrencia', 'ultDescricao', 'ultData', 'ultLocal', 'status', 'mensagem']) it[c] = ant[c];
+  }
+  if (ant.ultPendData && (!it.ultPendData || ant.ultPendData > it.ultPendData)) {
+    for (const c of ['ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal']) it[c] = ant[c];
+  }
+  it.qtdPendencias = Math.max(it.qtdPendencias || 0, ant.qtdPendencias || 0);
+  it.qtdWS = Math.max(it.qtdWS || 0, ant.qtdWS || 0);
+  for (const c of ['recebedor', 'agendamento', 'linkComprovante', 'cnpjTransp']) if (!it[c] && ant[c]) it[c] = ant[c];
+  if (ant.primData && (!it.primData || ant.primData < it.primData)) it.primData = ant.primData;
+}
+// Aplica ocorrências novas do webservice sem precisar do histórico completo em memória
+function aplicarEventosWS(it, eventos) {
+  for (const e of eventos.sort((a, b) => (a.dataISO || '').localeCompare(b.dataISO || ''))) {
+    if (!it.ultData || (e.dataISO || '') >= it.ultData) {
+      it.ultOcorrencia = e.ocorrencia; it.ultDescricao = e.descricao; it.ultData = e.dataISO; it.ultLocal = '';
+      it.status = classificar(e); it.mensagem = ''; it.erroApi = '';
+    }
+    if (ehPendencia(e)) {
+      it.qtdPendencias = (it.qtdPendencias || 0) + 1;
+      if (!it.ultPendData || (e.dataISO || '') >= it.ultPendData) { it.ultPendencia = e.ocorrencia; it.ultPendDescricao = e.descricao; it.ultPendData = e.dataISO; it.ultPendLocal = ''; }
+    }
+    if (e.recebedor) it.recebedor = e.recebedor;
+    if (e.link) it.linkComprovante = e.link;
+    if (e.agendamento) it.agendamento = e.agendamento;
+    if (!it.primData || (e.dataISO && e.dataISO < it.primData)) it.primData = e.dataISO;
+    it.qtdWS = (it.qtdWS || 0) + 1;
+  }
 }
 
 /* --- Junta rastreio (API) + ocorrências recebidas do SSW (webservice SSW2181) e recalcula o item --- */
@@ -595,42 +806,60 @@ function recalcular(it) {
   else if (it.erroApi) { it.status = /nenhum|nao localiz|não localiz|not found/i.test(it.erroApi) ? 'nao_localizado' : 'erro'; it.mensagem = it.erroApi; }
 }
 
-/* --- Sincronização com as ocorrências recebidas pelo Worker --- */
-const LS_ULT_OC = 'rastreioSSW.v1.ultimoIdOcorrencia';
+/* --- Sincronização com as ocorrências recebidas pelo Worker (D1) ---
+   O cursor fica no Firebase (rastreio_config/ws). Cada lote de ocorrências é gravado na base
+   por UM navegador só; os outros recebem a atualização pela própria base. */
+const LS_ULT_OC = 'rastreioSSW.v2.cursorWS';
 let sincronizando = false, ultimaSync = null;
 async function sincronizarOcorrencias(silencioso = true) {
-  if (sincronizando || !usuario) return;
+  if (sincronizando || !usuario || !baseCarregada) return;
   sincronizando = true;
-  const chaveCursor = LS_ULT_OC + '|' + workerUrl();
-  let aposId = 0; try { aposId = Number(localStorage.getItem(chaveCursor)) || 0; } catch {}
   let novas = 0, nfsNovas = 0;
   try {
+    const refCursor = db.collection(COL_CONFIG).doc('ws');
+    let aposId = 0;
+    try { aposId = Number(localStorage.getItem(LS_ULT_OC + '|' + workerUrl())) || 0; } catch {}
+    if (!aposId) { const c = await refCursor.get(); aposId = (c.exists && c.get('ultimoId')) || 0; }
     for (let volta = 0; volta < 20; volta++) {
       const j = await chamarWorker('/ocorrencias?apos_id=' + aposId + '&limite=2000');
-      const porChave = new Map(), porNF = new Map();
-      for (const i of itens) { if (i.chave) porChave.set(i.chave, i); if (i.nf) porNF.set(String(i.nf), i); }
-      const tocados = new Set();
-      for (const o of j.ocorrencias || []) {
-        let it = (o.chave && porChave.get(o.chave)) || porNF.get(String(o.nf));
-        if (!it) {
-          it = novoItem({ nf: o.nf ? String(o.nf) : '', chave: o.chave || '', pedido: o.pedido || '', origem: 'ssw' });
-          itens.push(it); nfsNovas++;
-          if (it.chave) porChave.set(it.chave, it); if (it.nf) porNF.set(String(it.nf), it);
+      const lista = j.ocorrencias || [];
+      if (lista.length) {
+        const porNF = new Map(); for (const i of itens) if (i.nf) porNF.set(String(i.nf), i);
+        const tocados = new Map();
+        for (const o of lista) {
+          let it = (o.chave && itensPorId.get(o.chave)) || porNF.get(String(o.nf));
+          if (!it) {
+            it = novoItem({ nf: o.nf ? String(o.nf) : '', chave: o.chave || '', pedido: o.pedido || '', origem: 'ssw' });
+            if (!it.id) continue;
+            itensPorId.set(it.id, it); nfsNovas++;
+            if (it.nf) porNF.set(String(it.nf), it);
+          }
+          if (!it.cnpjTransp && o.cnpj_transp) it.cnpjTransp = o.cnpj_transp;
+          if (!it.pedido && o.pedido) it.pedido = o.pedido;
+          it.ocorrenciasWS = (it.ocorrenciasWS || []).filter((x) => x.id !== o.id).concat(o);
+          if (!tocados.has(it)) tocados.set(it, []);
+          tocados.get(it).push(eventoWS(o)); novas++;
         }
-        if (!it.chave && o.chave) it.chave = o.chave;
-        if (!it.pedido && o.pedido) it.pedido = o.pedido;
-        if (!it.cnpjTransp && o.cnpj_transp) it.cnpjTransp = o.cnpj_transp;
-        it.ocorrenciasWS = (it.ocorrenciasWS || []).filter((x) => x.id !== o.id && !(x.data_evento === o.data_evento && x.codigo === o.codigo));
-        it.ocorrenciasWS.push(o);
-        tocados.add(it); novas++;
+        tocados.forEach((evs, it) => aplicarEventosWS(it, evs));
+        reconstruirLista();
+        // só quem avançar o cursor compartilhado grava este lote na base
+        const novoId = j.ultimo_id || aposId;
+        const souEu = await db.runTransaction(async (t) => {
+          const c = await t.get(refCursor);
+          const atual = (c.exists && c.get('ultimoId')) || 0;
+          if (atual >= novoId) return false;
+          t.set(refCursor, { ultimoId: novoId, em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email }, { merge: true });
+          return true;
+        });
+        if (souEu) await gravarAlteracoes();
+        else tocados.forEach((_, it) => { it._salvo = resumo(it); }); // outro navegador já gravou
+        aposId = novoId;
       }
-      tocados.forEach(recalcular);
-      aposId = j.ultimo_id || aposId;
-      try { localStorage.setItem(chaveCursor, String(aposId)); } catch {}
+      try { localStorage.setItem(LS_ULT_OC + '|' + workerUrl(), String(aposId)); } catch {}
       if (!j.mais) break;
     }
     ultimaSync = new Date();
-    if (novas) { salvar(); render(); if (detalheId) abrirDetalhe(detalheId); }
+    if (novas) { render(); if (detalheId) abrirDetalhe(detalheId, false); }
     atualizarStatusSync();
     if (!silencioso || novas) toast(novas ? `${novas} ocorrência(s) nova(s) do SSW` + (nfsNovas ? `, ${nfsNovas} NF(s) adicionada(s)` : '') : 'Nenhuma ocorrência nova do SSW.');
   } catch (e) {
@@ -819,7 +1048,7 @@ document.getElementById('tbody').onclick = (ev) => {
   const tr = ev.target.closest('tr[data-id]'); if (!tr) return;
   const id = tr.dataset.id;
   const acao = ev.target.dataset.acao;
-  if (acao === 'remover') { itens = itens.filter((i) => i.id !== id); salvar(); render(); return; }
+  if (acao === 'remover') { const it = itensPorId.get(id); if (it && confirm(`Remover a NF ${it.nf || it.id} da base? Ela some para todos.`)) removerItem(id); return; }
   if (acao === 'atualizar') { consultar([id]); return; }
   abrirDetalhe(id);
 };
@@ -863,9 +1092,32 @@ function renderPaginacao(total, totalPaginas, ini) {
 }
 
 /* ===================== DETALHE ===================== */
-function abrirDetalhe(id) {
-  const it = itens.find((i) => i.id === id); if (!it) return;
+// Ao abrir o detalhe, busca o histórico completo (rastreio + ocorrências do webservice) só desta NF
+async function buscarHistorico(it) {
+  const [api, ws] = await Promise.allSettled([
+    chamarWorker('/rastrear', { method: 'POST', body: JSON.stringify({ itens: [{ id: it.id, nf: it.nf, chave: it.chave, pedido: it.pedido }] }) }),
+    chamarWorker('/ocorrencias?' + new URLSearchParams({ chave: it.chave || '', nf: it.nf || '' })),
+  ]);
+  if (ws.status === 'fulfilled') it.ocorrenciasWS = ws.value.ocorrencias || [];
+  if (api.status === 'fulfilled' && api.value.resultados && api.value.resultados[0]) {
+    const r = api.value.resultados[0];
+    it.consultadoEm = new Date().toISOString(); it.fonte = r.fonte || ''; it.tentativas = r.tentativas || [];
+    if (r.ok) { const p = interpretarSSW(r.resposta); it.eventosApi = p.eventos; it.cabecalho = p.cabecalho; it.previsaoSSW = p.cabecalho.previsao || it.previsaoSSW || ''; it.erroApi = ''; }
+    else it.erroApi = r.mensagem || 'Não localizado';
+  }
+  const anterior = { ...it };
+  recalcular(it);
+  if (ws.status !== 'fulfilled') preservarMaisRecente(it, anterior);
+  it._historicoCompleto = true;
+  salvar(); render();
+}
+function abrirDetalhe(id, buscar = true) {
+  const it = itensPorId.get(id); if (!it) return;
   detalheId = id;
+  if (buscar && !it._historicoCompleto) {
+    document.getElementById('detTimeline').innerHTML = '<li class="ml-5 text-sm text-slate-500">Buscando histórico completo…</li>';
+    buscarHistorico(it).then(() => { if (detalheId === id) abrirDetalhe(id, false); }).catch((e) => toast('Erro ao buscar histórico: ' + e.message));
+  }
   calcularDerivados(it);
   document.getElementById('detTitulo').textContent = it.nf || it.pedido || it.chave;
   document.getElementById('detStatus').innerHTML = badge(it.status);
@@ -878,7 +1130,8 @@ function abrirDetalhe(id) {
   ].filter(([, v]) => v);
   document.getElementById('detInfo').innerHTML = info.map(([k, v]) => `<div><div class="text-xs text-slate-500">${k}</div><div class="font-medium break-words ${k === 'Última pendência' ? 'text-amber-700' : ''}">${esc(v)}</div></div>`).join('')
     + (it.chave ? `<div class="col-span-2"><div class="text-xs text-slate-500">Chave NF-e</div><div class="font-mono text-xs break-all">${esc(it.chave)}</div></div>` : '');
-  const evs = (it.eventos || []).slice().reverse();
+  const evs = (it._historicoCompleto || (it.eventos || []).length ? (it.eventos || []) : []).slice().reverse();
+  if (buscar && !it._historicoCompleto && !evs.length) { document.getElementById('overlayDet').classList.remove('hidden'); document.getElementById('drawer').classList.remove('translate-x-full'); return; }
   document.getElementById('detTimeline').innerHTML = evs.length ? evs.map((e, idx) => {
     const st = STATUS[classificar(e)];
     return `<li class="ml-5">
@@ -902,7 +1155,7 @@ function fecharDetalhe() {
 }
 document.getElementById('btnDetFechar').onclick = fecharDetalhe;
 document.getElementById('overlayDet').onclick = fecharDetalhe;
-document.getElementById('btnDetAtualizar').onclick = () => detalheId && consultar([detalheId]);
+document.getElementById('btnDetAtualizar').onclick = () => { const it = detalheId && itensPorId.get(detalheId); if (it) { it._historicoCompleto = false; abrirDetalhe(detalheId); } };
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { fecharDetalhe(); document.querySelectorAll('#modalAdd,#modalConfig').forEach((m) => m.classList.add('hidden')); } });
 
 /* ===================== AÇÕES ===================== */
@@ -911,19 +1164,16 @@ document.getElementById('btnAdicionar').onclick = () => { document.getElementByI
 document.getElementById('btnConfirmarAdd').onclick = () => {
   const lista = interpretarTexto(document.getElementById('txtNFs').value);
   if (!lista.length) { toast('Nenhuma NF reconhecida.'); return; }
-  const ids = adicionarItens(lista);
+  if (!baseCarregada) { toast('Aguarde a base terminar de carregar.'); return; }
+  const r = adicionarItens(lista, 'manual');
+  registrarImportacao(['(digitado)'], lista.length, r);
+  toast(resumoImportacao(r));
   document.getElementById('txtNFs').value = '';
   document.getElementById('modalAdd').classList.add('hidden');
-  if (document.getElementById('chkConsultarAgora').checked) consultar(ids);
+  if (document.getElementById('chkConsultarAgora').checked) consultar(r.ids);
 };
 document.getElementById('btnAtualizarPend').onclick = () => consultar(itens.filter((i) => i.status !== 'entregue').map((i) => i.id));
 document.getElementById('btnAtualizarTodas').onclick = () => consultar(itens.map((i) => i.id));
-document.getElementById('btnLimparEntregues').onclick = () => {
-  const n = itens.filter((i) => i.status === 'entregue').length;
-  if (!n) return toast('Nenhuma NF entregue na lista.');
-  if (confirm(`Remover ${n} NF(s) entregue(s) da lista?`)) { itens = itens.filter((i) => i.status !== 'entregue'); salvar(); render(); }
-};
-document.getElementById('btnLimparTudo').onclick = () => { if (itens.length && confirm(`Remover todas as ${itens.length} NFs da lista?`)) { itens = []; salvar(); render(); } };
 document.getElementById('btnExportar').onclick = () => {
   if (!itens.length) return toast('Lista vazia.');
   const linhas = itens.map((i) => ({
