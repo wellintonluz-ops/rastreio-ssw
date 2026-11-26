@@ -86,7 +86,7 @@
     </section>
 
     <!-- KPIs -->
-    <section id="kpis" class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3"></section>
+    <section id="kpis" class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3"></section>
 
     <!-- Filtros + tabela -->
     <section class="bg-white rounded-xl shadow-sm">
@@ -104,6 +104,11 @@
         </label>
         <label class="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" id="filtroPend"> Só com pendência</label>
         <label class="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" id="filtroAtraso"> Só atrasadas</label>
+        <label class="text-sm text-slate-600 flex items-center gap-2" title="Se a NF tem XML importado e/ou ocorrências enviadas pela transportadora (integração SSW2181)">Vínculo
+          <select id="filtroVinculo" class="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
+            <option value="">Todas</option><option value="ambos">🔗 XML + integração</option><option value="soxml">Só XML (sem integração)</option><option value="soint">Só integração (sem XML)</option>
+          </select>
+        </label>
         <span id="contagem" class="text-sm text-slate-500"></span>
       </div>
       <div>
@@ -196,6 +201,34 @@
   </div>
 </div>
 
+<!-- MODAL RELATÓRIO DE VÍNCULO (importação) -->
+<div id="modalRelatorio" class="hidden fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-5xl max-h-[92vh] flex flex-col">
+    <div class="p-4 border-b border-slate-100 flex items-start gap-3">
+      <div class="flex-1"><h3 class="font-semibold text-slate-800">Resultado da importação — vínculo com a integração</h3>
+        <p id="relResumo" class="text-xs text-slate-500 mt-1"></p></div>
+      <button onclick="fecharRelatorio()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">✕</button>
+    </div>
+    <div class="p-4 space-y-3 overflow-auto">
+      <div id="relCards" class="grid grid-cols-2 md:grid-cols-4 gap-2"></div>
+      <p id="relSemXml" class="text-xs text-slate-500"></p>
+      <div id="relDesc" class="text-sm bg-slate-50 rounded-lg p-3"></div>
+      <table class="w-full text-sm">
+        <thead class="text-[11px] uppercase text-slate-500 bg-slate-50"><tr>
+          <th class="text-left px-2 py-1.5">NF</th><th class="text-left px-2 py-1.5">Cliente</th><th class="text-left px-2 py-1.5">Destino</th>
+          <th class="text-left px-2 py-1.5">Transportadora</th><th class="text-left px-2 py-1.5">Status</th><th class="text-left px-2 py-1.5">Na importação</th></tr></thead>
+        <tbody id="relTbody"></tbody>
+      </table>
+    </div>
+    <div class="p-4 border-t border-slate-100 flex flex-wrap gap-2 justify-end">
+      <button onclick="exportarRelatorioVinculo()" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⬇ Baixar relatório (Excel)</button>
+      <button id="relConsultarSem" class="px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 font-medium disabled:opacity-40"></button>
+      <button id="relConsultarTodas" class="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium disabled:opacity-40"></button>
+      <button onclick="fecharRelatorio()" class="px-4 py-2 rounded-lg bg-slate-800 text-white hover:bg-slate-900 font-medium">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL CONFIG -->
 <div id="modalConfig" class="hidden fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
   <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg">
@@ -270,6 +303,7 @@ const STATUS = {
   ocorrencia:     { label: 'Com ocorrência',    cor: 'bg-amber-100 text-amber-800',     dot: 'bg-amber-500',   ordem: 1 },
   devolucao:      { label: 'Devolução',         cor: 'bg-red-100 text-red-800',         dot: 'bg-red-500',     ordem: 0 },
   nao_localizado: { label: 'Não localizada',    cor: 'bg-slate-200 text-slate-700',     dot: 'bg-slate-400',   ordem: 2 },
+  sem_cte:        { label: 'Sem emissão de CT-e', cor: 'bg-violet-100 text-violet-800', dot: 'bg-violet-500',  ordem: 2 },
   erro:           { label: 'Erro na consulta',  cor: 'bg-rose-100 text-rose-800',       dot: 'bg-rose-500',    ordem: 2 },
   pendente:       { label: 'Não consultada',    cor: 'bg-white text-slate-500 border border-slate-300', dot: 'bg-slate-300', ordem: 5 },
 };
@@ -309,7 +343,7 @@ const BALDES_POR_MES = 100;
 const LS_PERIODO = 'rastreioSSW.v2.periodo';
 let mesesPeriodo = (() => { try { const v = localStorage.getItem(LS_PERIODO); return v === null ? 3 : Number(v); } catch { return 3; } })(); // 0 = tudo
 const IMPORTAR_A_PARTIR_DE = '2026-11-01'; // importação aceita só NFs emitidas a partir desta data
-const CAMPOS_SALVOS = ['nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
+const CAMPOS_SALVOS = ['cnpjTranspNF', 'xmlEm', 'nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
   'origem', 'adicionadoEm', 'adicionadoPor', 'status', 'mensagem', 'erroApi', 'ultOcorrencia', 'ultDescricao', 'ultData', 'ultLocal',
   'ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal', 'qtdPendencias', 'recebedor', 'agendamento', 'linkComprovante',
   'primData', 'consultadoEm', 'fonte', 'qtdWS', 'cnpjTransp'];
@@ -744,7 +778,7 @@ function soDig(v) { return (v == null ? '' : String(v)).replace(/\D/g, ''); }
 function nfDaChave(ch) { return ch.length === 44 ? String(Number(ch.slice(25, 34))) : ''; }
 function chaveItem(it) { return it.chave || (it.nf ? 'NF' + it.nf : '') || (it.pedido ? 'P' + it.pedido : ''); }
 
-const CAMPOS_IMPORTADOS = ['chave', 'nf', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'emissao', 'transportadora', 'valor'];
+const CAMPOS_IMPORTADOS = ['chave', 'nf', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'emissao', 'transportadora', 'valor', 'cnpjTranspNF'];
 function novoItem(dados) {
   const it = { nf: '', chave: '', pedido: '', cliente: '', cidadeDestino: '', status: 'pendente',
     adicionadoEm: new Date().toISOString(), adicionadoPor: usuario ? usuario.email : '', ...dados };
@@ -754,17 +788,22 @@ function novoItem(dados) {
   return it;
 }
 
+// NF tem dados da integração (ocorrências enviadas pela transportadora via SSW2181)?
+const temIntegracao = (it) => (it.qtdWS || 0) > 0 || it.origem === 'ssw';
+const temXml = (it) => !!it.xmlEm || it.origem === 'xml';
 // Importa sem duplicar: mesma chave = mesmo registro. Se algum dado mudou, atualiza só ele.
+// detalhe: uma linha por NF do arquivo, dizendo se ela casou com dados da integração
 function adicionarItens(lista, origem = 'manual') {
   let novos = 0, atualizados = 0, iguais = 0, repetidosNoArquivo = 0, convertidos = 0, foraDoPeriodo = 0;
-  const ids = [], vistos = new Set();
+  const ids = [], vistos = new Set(), detalhe = [];
+  const agoraISO = new Date().toISOString();
   for (const d of lista) {
     const cand = novoItem({ ...d, origem });
     if (!cand.id) continue;
     if (origem !== 'ssw' && emitidaAntesDoInicio(cand)) { foraDoPeriodo++; continue; }
     if (vistos.has(cand.id)) { repetidosNoArquivo++; continue; }
     vistos.add(cand.id);
-    let ex = itensPorId.get(cand.id);
+    let ex = itensPorId.get(cand.id), situacao;
     // NF cadastrada antes só pelo número e agora chegou com a chave: vira um registro só
     if (!ex && cand.chave && itensPorId.has('NF' + cand.nf)) {
       const antigo = itensPorId.get('NF' + cand.nf);
@@ -778,24 +817,30 @@ function adicionarItens(lista, origem = 'manual') {
         const v = cand[c];
         if (v !== undefined && v !== null && v !== '' && String(v) !== String(ex[c] ?? '')) { ex[c] = v; mudou = true; }
       }
+      if (origem === 'xml' && !temXml(ex)) { ex.xmlEm = agoraISO; mudou = true; }
       if (mudou) atualizados++; else iguais++;
+      situacao = mudou ? 'atualizada' : 'igual';
       ids.push(ex.id);
     } else {
+      if (origem === 'xml') cand.xmlEm = agoraISO;
       itensPorId.set(cand.id, cand); novos++; ids.push(cand.id);
+      ex = cand; situacao = 'nova';
     }
+    detalhe.push({ id: ex.id, situacao, vinculada: temIntegracao(ex) });
   }
   reconstruirLista(); salvar(); render();
-  return { ids, novos, atualizados, iguais, repetidosNoArquivo, convertidos, foraDoPeriodo };
+  return { ids, novos, atualizados, iguais, repetidosNoArquivo, convertidos, foraDoPeriodo, detalhe };
 }
 function resumoImportacao(r) {
   return `${r.novos} NF(s) nova(s)` + (r.atualizados ? `, ${r.atualizados} já existiam e foram atualizadas` : '') +
     (r.iguais ? `, ${r.iguais} já existiam sem mudança (não duplicadas)` : '') + (r.repetidosNoArquivo ? `, ${r.repetidosNoArquivo} repetida(s) no próprio arquivo` : '') +
     (r.foraDoPeriodo ? `, ${r.foraDoPeriodo} ignorada(s) por serem emitidas antes de ${IMPORTAR_A_PARTIR_DE.split('-').reverse().join('/')}` : '');
 }
-async function registrarImportacao(arquivos, lidas, r) {
+async function registrarImportacao(arquivos, lidas, r, rel) {
   try {
     await db.collection(COL_IMPORT).add({ em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email,
-      arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo, foraDoPeriodo: r.foraDoPeriodo || 0 });
+      arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo, foraDoPeriodo: r.foraDoPeriodo || 0,
+      ...(rel ? { vinculadas: rel.grupos.vinculada.length, aguardandoIntegracao: rel.grupos.aguardando.length, transportadoraNaoIntegrada: rel.grupos.nao_integrada.length, semTransportadora: rel.grupos.sem_transp.length } : {}) });
   } catch (e) { console.warn('[Importação] não registrou o histórico', e); }
 }
 
@@ -857,6 +902,7 @@ function lerXmlNFe(texto) {
     previsao: prev,
     emissao: (t(ide, 'dhEmi') || t(ide, 'dEmi')).slice(0, 19),
     transportadora: t(transp, 'xNome'),
+    cnpjTranspNF: soDig(t(transp, 'CNPJ')),
     valor: t(inf.getElementsByTagName('ICMSTot')[0], 'vNF'),
   };
 }
@@ -903,6 +949,92 @@ async function lerPlanilha(f) {
   return lista;
 }
 
+/* --- Relatório de vínculo da importação: o que casou com a integração (SSW2181) e o que não --- */
+const VINCULO = {
+  vinculada:     { rot: 'Vinculadas à integração', desc: 'A transportadora já mandou ocorrências desta NF. O XML completou os dados (cliente, destino, previsão, valor).', cor: 'emerald' },
+  aguardando:    { rot: 'Transportadora integrada, sem ocorrência ainda', desc: 'A transportadora envia pela integração, mas ainda não mandou nada desta NF (normal se a NF acabou de sair). Vincula sozinha quando chegar a 1ª ocorrência. Se a consulta também não achar nada no SSW, fica marcada como “Sem emissão de CT-e”.', cor: 'blue' },
+  nao_integrada: { rot: 'Transportadora não integrada', desc: 'A transportadora desta NF não envia ocorrências pela integração. Estas NFs só têm o rastreio público (botão Consultar); se ele não achar nada, a NF fica marcada como “Sem emissão de CT-e”. Peça a ela o SSW2181.', cor: 'amber' },
+  sem_transp:    { rot: 'XML sem transportadora', desc: 'O XML não informa o CNPJ da transportadora (ex.: retirada pelo cliente ou frete por conta do destinatário sem transportador).', cor: 'slate' },
+};
+let ultimoRelatorio = null;
+async function montarRelatorioVinculo(r) {
+  let raizes = null;
+  try {
+    if (!integradas || Date.now() - integradas.em > 120000) { const j = await chamarWorker('/integradas'); integradas = { em: Date.now(), agora: j.agora, lista: j.transportadoras || [] }; }
+    raizes = new Set(integradas.lista.map((t) => raizCnpj(t.cnpj_transp)));
+  } catch (e) { console.warn('[Vínculo] sem lista de integradas', e); }
+  const grupos = { vinculada: [], aguardando: [], nao_integrada: [], sem_transp: [] };
+  for (const d of r.detalhe || []) {
+    const it = itensPorId.get(d.id); if (!it) continue;
+    const cnpj = soDig(it.cnpjTranspNF || it.cnpjTransp);
+    let g;
+    if (temIntegracao(it)) g = 'vinculada';
+    else if (!cnpj) g = 'sem_transp';
+    else if (raizes && raizes.has(raizCnpj(cnpj))) g = 'aguardando';
+    else g = 'nao_integrada';
+    grupos[g].push({ it, situacao: d.situacao });
+  }
+  // NFs que chegaram pela integração e ainda não têm XML (na base carregada)
+  const semXml = itens.filter((i) => temIntegracao(i) && !temXml(i)).length;
+  return { grupos, semXml, semListaIntegradas: !raizes };
+}
+function mostrarRelatorioVinculo(msg, r, rel) {
+  ultimoRelatorio = { r, rel, abaRel: Object.keys(rel.grupos).find((k) => rel.grupos[k].length) || 'vinculada' };
+  const n = (v) => Number(v || 0).toLocaleString('pt-BR');
+  const tot = Object.values(rel.grupos).reduce((a, g) => a + g.length, 0);
+  document.getElementById('relResumo').innerHTML = esc(msg.join(' · ')) + '<br>' + esc(resumoImportacao(r)) + '.' +
+    (rel.semListaIntegradas ? '<br><span class="text-amber-700">Não consegui consultar a lista de transportadoras integradas agora; as não vinculadas aparecem como “não integrada”.</span>' : '');
+  document.getElementById('relCards').innerHTML = Object.entries(VINCULO).map(([k, v]) => {
+    const q = rel.grupos[k].length, pct = tot ? Math.round(q / tot * 100) : 0;
+    return `<button data-relaba="${k}" class="text-left rounded-lg border p-3 hover:shadow-sm border-${v.cor}-200 bg-${v.cor}-50">
+      <div class="text-[11px] text-${v.cor}-800 font-medium">${v.rot}</div>
+      <div class="text-2xl font-semibold text-${v.cor}-700">${n(q)} <span class="text-xs font-normal text-slate-500">${pct}%</span></div></button>`;
+  }).join('');
+  document.getElementById('relSemXml').textContent = rel.semXml
+    ? `Além disso, ${n(rel.semXml)} NF(s) que chegaram pela integração ainda não têm XML importado (sem cliente, destino e previsão).` : '';
+  document.querySelectorAll('[data-relaba]').forEach((b) => b.onclick = () => { ultimoRelatorio.abaRel = b.dataset.relaba; renderRelatorioAba(); });
+  const naoEnt = (g) => g.filter((x) => x.it.status !== 'entregue').map((x) => x.it.id);
+  const semVinc = naoEnt([...rel.grupos.aguardando, ...rel.grupos.nao_integrada, ...rel.grupos.sem_transp]);
+  const todas = naoEnt(Object.values(rel.grupos).flat());
+  const bSem = document.getElementById('relConsultarSem'), bTodas = document.getElementById('relConsultarTodas');
+  bSem.textContent = `⟳ Consultar na SSW as não vinculadas (${n(semVinc.length)})`; bSem.disabled = !semVinc.length; bSem.onclick = () => { fecharRelatorio(); consultar(semVinc); };
+  bTodas.textContent = `⟳ Consultar todas as não entregues (${n(todas.length)})`; bTodas.disabled = !todas.length; bTodas.onclick = () => { fecharRelatorio(); consultar(todas); };
+  renderRelatorioAba();
+  document.getElementById('modalRelatorio').classList.remove('hidden');
+}
+function renderRelatorioAba() {
+  const { rel, abaRel } = ultimoRelatorio, v = VINCULO[abaRel], lista = rel.grupos[abaRel];
+  document.querySelectorAll('[data-relaba]').forEach((b) => b.classList.toggle('ring-2', b.dataset.relaba === abaRel));
+  document.querySelectorAll('[data-relaba]').forEach((b) => b.classList.toggle('ring-blue-500', b.dataset.relaba === abaRel));
+  // transportadoras do grupo (útil para saber de quem pedir a integração)
+  const porTransp = new Map();
+  for (const { it } of lista) { const k = it.transportadora || nomeTransportadora(it) || '(sem transportadora)'; porTransp.set(k, (porTransp.get(k) || 0) + 1); }
+  const resumoT = [...porTransp.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, q]) => `<span class="inline-block bg-white border border-slate-200 rounded px-2 py-0.5 mr-1 mb-1">${esc(k)} <b>${q}</b></span>`).join('');
+  const sit = { nova: 'Nova', atualizada: 'Atualizada', igual: 'Já estava igual' };
+  document.getElementById('relDesc').innerHTML = `<div class="font-medium text-slate-700">${v.rot} — ${lista.length.toLocaleString('pt-BR')} NF(s)</div><div class="text-slate-500 mb-2">${v.desc}</div>${lista.length ? '<div class="text-xs">' + resumoT + '</div>' : ''}`;
+  document.getElementById('relTbody').innerHTML = lista.slice(0, 300).map(({ it, situacao }) => `<tr class="border-t border-slate-100">
+    <td class="px-2 py-1.5 font-medium">${esc(it.nf)}</td>
+    <td class="px-2 py-1.5 truncate max-w-[220px]" title="${esc(it.cliente)}">${esc(it.cliente)}</td>
+    <td class="px-2 py-1.5 text-slate-500">${esc(it.cidadeDestino)}</td>
+    <td class="px-2 py-1.5 truncate max-w-[220px]" title="${esc(it.transportadora || nomeTransportadora(it))}">${esc(it.transportadora || nomeTransportadora(it))}</td>
+    <td class="px-2 py-1.5">${badge(it.status)}</td>
+    <td class="px-2 py-1.5 text-slate-500 text-xs">${sit[situacao] || ''}</td></tr>`).join('') +
+    (lista.length > 300 ? `<tr><td colspan="6" class="px-2 py-2 text-center text-xs text-slate-400">Mostrando 300 de ${lista.length.toLocaleString('pt-BR')}. Baixe o Excel para ver todas.</td></tr>` : '');
+}
+function fecharRelatorio() { document.getElementById('modalRelatorio').classList.add('hidden'); }
+function exportarRelatorioVinculo() {
+  if (!ultimoRelatorio) return;
+  const linhas = [];
+  for (const [k, g] of Object.entries(ultimoRelatorio.rel.grupos)) for (const { it, situacao } of g) linhas.push({
+    'Vínculo': VINCULO[k].rot, 'NF': it.nf, 'Chave': it.chave, 'Pedido': it.pedido || '', 'Cliente': it.cliente || '', 'Destino': it.cidadeDestino || '',
+    'Transportadora (XML)': it.transportadora || '', 'CNPJ transportadora (XML)': it.cnpjTranspNF || '', 'Transportadora (integração)': it.cnpjTransp ? nomeTransportadora({ cnpjTransp: it.cnpjTransp }) : '',
+    'Status': STATUS[it.status]?.label || it.status, 'Última ocorrência': it.ultOcorrencia || '', 'Na importação': { nova: 'Nova', atualizada: 'Atualizada', igual: 'Já estava igual' }[situacao] || '',
+  });
+  const ws = XLSX.utils.json_to_sheet(linhas), wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Vínculo');
+  XLSX.writeFile(wb, `vinculo_importacao_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.xlsx`);
+}
+
 async function importarArquivos(arquivos) {
   arquivos = [...arquivos];
   if (!arquivos.length) return;
@@ -920,9 +1052,9 @@ async function importarArquivos(arquivos) {
     for (const f of planilhas) { const l = await lerPlanilha(f); lista = lista.concat(l); msg.push(`${l.length} linha(s) de ${f.name}`); }
     if (!lista.length) { toast('Nenhuma NF encontrada nos arquivos.'); return; }
     const r = adicionarItens(lista, xmlZip.length ? 'xml' : 'planilha');
-    registrarImportacao(arquivos.map((f) => f.name), lista.length, r);
-    const paraConsultar = r.ids.filter((id) => { const it = itensPorId.get(id); return it && it.status !== 'entregue'; });
-    if (confirm(msg.join('\n') + '\n' + resumoImportacao(r) + '.\n\nConsultar agora na SSW as ' + paraConsultar.length + ' NF(s) não entregues?')) consultar(paraConsultar);
+    const rel = await montarRelatorioVinculo(r);
+    registrarImportacao(arquivos.map((f) => f.name), lista.length, r, rel);
+    mostrarRelatorioVinculo(msg, r, rel);
   } catch (e) { toast('Erro ao ler arquivo: ' + e.message); }
 }
 
@@ -966,7 +1098,8 @@ async function consultar(ids) {
     await gravarAlteracoes();
     setTimeout(() => prog.classList.add('hidden'), 800);
     if (detalheId) abrirDetalhe(detalheId);
-    toast(erroGeral ? 'Consulta terminou com erros: ' + erroGeral : 'Consulta concluída.');
+    const semCte = alvo.filter((i) => i.status === 'sem_cte').length;
+    toast(erroGeral ? 'Consulta terminou com erros: ' + erroGeral : 'Consulta concluída.' + (semCte ? ` ${semCte} NF(s) sem emissão de CT-e (nada na integração nem no rastreio do SSW).` : ''));
   }
 }
 function atualizarProgresso(f, t) {
@@ -1072,7 +1205,8 @@ function recalcular(it) {
   it.ultPendLocal = up ? up.local : '';
   it.qtdWS = ws.length;
   if (ult) { it.status = classificar(ult); it.mensagem = ''; }
-  else if (it.erroApi) { it.status = /nenhum|nao localiz|não localiz|not found/i.test(it.erroApi) ? 'nao_localizado' : 'erro'; it.mensagem = it.erroApi; }
+  // nada na integração e nada no rastreio do SSW: a transportadora ainda não emitiu o CT-e desta NF
+  else if (it.erroApi) { it.status = /nenhum|nao localiz|não localiz|not found/i.test(it.erroApi) ? (temIntegracao(it) ? 'nao_localizado' : 'sem_cte') : 'erro'; it.mensagem = it.erroApi; }
 }
 
 /* --- Sincronização com as ocorrências recebidas pelo Worker (D1) ---
@@ -1220,6 +1354,8 @@ const badge = (st) => { const s = STATUS[st] || STATUS.pendente; return `<span c
 
 const fmtDia = (iso) => { if (!iso) return ''; const [a, m, d] = iso.slice(0, 10).split('-'); return d && m && a ? `${d}/${m}/${a}` : iso; };
 function calcularDerivados(it) {
+  // registros antigos: "não localizada" sem nada da integração = sem emissão de CT-e
+  if (it.status === 'nao_localizado' && !it.ultData && !temIntegracao(it)) it.status = 'sem_cte';
   const prev = paraISO(it.previsaoSSW || it.previsao || '');
   it.prevISO = /^\d{4}-\d{2}-\d{2}/.test(prev) ? prev.slice(0, 10) : '';
   it.atraso = null;
@@ -1234,6 +1370,12 @@ function calcularDerivados(it) {
   it.diasTotal = it.primData ? Math.max(0, Math.floor((fim - new Date(it.primData)) / 86400000)) : null;
 }
 
+function marcaVinculo(i) {
+  const x = temXml(i), w = temIntegracao(i);
+  if (x && w) return ' <span class="text-[10px] font-normal px-1 rounded bg-emerald-100 text-emerald-700" title="XML importado e vinculado às ocorrências da integração">🔗</span>';
+  if (w) return ' <span class="text-[10px] font-normal px-1 rounded bg-amber-100 text-amber-700" title="Chegou pela integração, mas o XML ainda não foi importado">sem XML</span>';
+  return '';
+}
 function render() {
   itens.forEach(calcularDerivados);
   // KPIs
@@ -1245,6 +1387,7 @@ function render() {
     ['saiu', 'Saiu p/ entrega', cont.saiu, 'text-blue-600'],
     ['transito', 'Em trânsito', cont.transito, 'text-sky-600'],
     ['ocorrencia', 'Com ocorrência', cont.ocorrencia + cont.devolucao, 'text-amber-600'],
+    ['sem_cte', 'Sem emissão de CT-e', cont.sem_cte, 'text-violet-600'],
     ['nao_localizado', 'Não localizadas', cont.nao_localizado + cont.erro, 'text-slate-500'],
     ['pendente', 'Não consultadas', cont.pendente, 'text-slate-400'],
   ];
@@ -1261,6 +1404,7 @@ function render() {
   const parado = Number(document.getElementById('filtroParado').value);
   const soPend = document.getElementById('filtroPend').checked;
   const soAtraso = document.getElementById('filtroAtraso').checked;
+  const vinc = document.getElementById('filtroVinculo').value;
   let lista = itens.filter((i) => {
     if (filtroStatus) {
       const grupo = { ocorrencia: ['ocorrencia', 'devolucao'], nao_localizado: ['nao_localizado', 'erro'] }[filtroStatus] || [filtroStatus];
@@ -1269,6 +1413,7 @@ function render() {
     if (parado && !(i.diasParado != null && i.diasParado > parado)) return false;
     if (soPend && !i.ultPendencia) return false;
     if (soAtraso && !(i.atraso > 0)) return false;
+    if (vinc) { const x = temXml(i), w = temIntegracao(i); if (vinc === 'ambos' ? !(x && w) : vinc === 'soxml' ? !(x && !w) : !(w && !x)) return false; }
     if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, nomeTransportadora(i), i.cnpjTransp, i.chave].join(' ')).includes(q)) return false;
     return true;
   });
@@ -1294,7 +1439,7 @@ function render() {
     const alerta = i.diasParado != null && i.diasParado >= 3 ? 'text-red-600 font-semibold' : '';
     const pendAtual = ['ocorrencia', 'devolucao'].includes(i.status);
     return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer align-top" data-id="${i.id}">
-      <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
+      <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}${marcaVinculo(i)}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
       <td class="px-2 py-2"><div class="truncate" title="${esc(i.cliente)}">${esc(i.cliente)}</div><div class="text-[11px] text-slate-400 truncate">${esc(i.cidadeDestino)}</div></td>
       <td class="px-2 py-2">${badge(i.status)}${nomeTransportadora(i) ? `<div class="text-[11px] text-slate-400 truncate mt-1" title="${esc(nomeTransportadora(i))}">${esc(nomeTransportadora(i))}</div>` : ''}</td>
       <td class="px-2 py-2">${i.ultPendencia ? `<div class="line-clamp-2 leading-snug ${pendAtual ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-[11px] text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + 'x' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
@@ -1332,6 +1477,7 @@ document.getElementById('busca').oninput = renderPag1;
 document.getElementById('filtroParado').onchange = renderPag1;
 document.getElementById('filtroPend').onchange = renderPag1;
 document.getElementById('filtroAtraso').onchange = renderPag1;
+document.getElementById('filtroVinculo').onchange = renderPag1;
 document.getElementById('filtroPeriodo').value = String(mesesPeriodo);
 document.getElementById('filtroPeriodo').onchange = (e) => mudarPeriodo(Number(e.target.value));
 
