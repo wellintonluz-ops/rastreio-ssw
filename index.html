@@ -210,20 +210,23 @@
       <button onclick="fecharRelatorio()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">✕</button>
     </div>
     <div class="p-4 space-y-3 overflow-auto">
+      <div id="relProg" class="hidden">
+        <div id="relProgTxt" class="text-xs text-slate-600 mb-1">Consultando o rastreio público…</div>
+        <div class="h-2 bg-slate-100 rounded-full overflow-hidden"><div id="relProgBar" class="h-full bg-blue-500 w-0 transition-all"></div></div>
+      </div>
       <div id="relCards" class="grid grid-cols-2 md:grid-cols-4 gap-2"></div>
       <p id="relSemXml" class="text-xs text-slate-500"></p>
       <div id="relDesc" class="text-sm bg-slate-50 rounded-lg p-3"></div>
       <table class="w-full text-sm">
         <thead class="text-[11px] uppercase text-slate-500 bg-slate-50"><tr>
           <th class="text-left px-2 py-1.5">NF</th><th class="text-left px-2 py-1.5">Cliente</th><th class="text-left px-2 py-1.5">Destino</th>
-          <th class="text-left px-2 py-1.5">Transportadora</th><th class="text-left px-2 py-1.5">Status</th><th class="text-left px-2 py-1.5">Na importação</th></tr></thead>
+          <th class="text-left px-2 py-1.5">Transportadora</th><th class="text-left px-2 py-1.5" title="A transportadora envia ocorrências pela integração SSW2181?">Integrada?</th><th class="text-left px-2 py-1.5">Status</th><th class="text-left px-2 py-1.5">Na importação</th></tr></thead>
         <tbody id="relTbody"></tbody>
       </table>
     </div>
     <div class="p-4 border-t border-slate-100 flex flex-wrap gap-2 justify-end">
       <button onclick="exportarRelatorioVinculo()" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⬇ Baixar relatório (Excel)</button>
-      <button id="relConsultarSem" class="px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 font-medium disabled:opacity-40"></button>
-      <button id="relConsultarTodas" class="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium disabled:opacity-40"></button>
+      <button id="relConsultar" class="px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 font-medium disabled:opacity-40"></button>
       <button onclick="fecharRelatorio()" class="px-4 py-2 rounded-lg bg-slate-800 text-white hover:bg-slate-900 font-medium">Fechar</button>
     </div>
   </div>
@@ -840,7 +843,7 @@ async function registrarImportacao(arquivos, lidas, r, rel) {
   try {
     await db.collection(COL_IMPORT).add({ em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email,
       arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo, foraDoPeriodo: r.foraDoPeriodo || 0,
-      ...(rel ? { vinculadas: rel.grupos.vinculada.length, aguardandoIntegracao: rel.grupos.aguardando.length, transportadoraNaoIntegrada: rel.grupos.nao_integrada.length, semTransportadora: rel.grupos.sem_transp.length } : {}) });
+      ...(rel || {}) });
   } catch (e) { console.warn('[Importação] não registrou o histórico', e); }
 }
 
@@ -949,85 +952,99 @@ async function lerPlanilha(f) {
   return lista;
 }
 
-/* --- Relatório de vínculo da importação: o que casou com a integração (SSW2181) e o que não --- */
+/* --- Relatório de vínculo da importação ---
+   Depois de importar, o painel consulta sozinho o rastreio público das NFs que não vieram pela integração.
+   Resultado: vinculada à integração / com rastreio público / sem emissão de CT-e (nada na integração nem no público). */
 const VINCULO = {
-  vinculada:     { rot: 'Vinculadas à integração', desc: 'A transportadora já mandou ocorrências desta NF. O XML completou os dados (cliente, destino, previsão, valor).', cor: 'emerald' },
-  aguardando:    { rot: 'Transportadora integrada, sem ocorrência ainda', desc: 'A transportadora envia pela integração, mas ainda não mandou nada desta NF (normal se a NF acabou de sair). Vincula sozinha quando chegar a 1ª ocorrência. Se a consulta também não achar nada no SSW, fica marcada como “Sem emissão de CT-e”.', cor: 'blue' },
-  nao_integrada: { rot: 'Transportadora não integrada', desc: 'A transportadora desta NF não envia ocorrências pela integração. Estas NFs só têm o rastreio público (botão Consultar); se ele não achar nada, a NF fica marcada como “Sem emissão de CT-e”. Peça a ela o SSW2181.', cor: 'amber' },
-  sem_transp:    { rot: 'XML sem transportadora', desc: 'O XML não informa o CNPJ da transportadora (ex.: retirada pelo cliente ou frete por conta do destinatário sem transportador).', cor: 'slate' },
+  vinculada: { rot: 'Vinculadas à integração', desc: 'A transportadora já mandou ocorrências desta NF pela integração (SSW2181). O XML completou os dados (cliente, destino, previsão, valor).', cor: 'emerald' },
+  publico:   { rot: 'Com rastreio público', desc: 'Não veio pela integração, mas o rastreio público do SSW encontrou a NF. Se a transportadora não for integrada, peça a ela o SSW2181 para receber as ocorrências automaticamente.', cor: 'blue' },
+  sem_cte:   { rot: 'Sem emissão de CT-e', desc: 'Nada na integração e nada no rastreio público do SSW: a transportadora ainda não emitiu o CT-e desta NF (ou não usa SSW). O marcador sai sozinho quando o CT-e aparecer.', cor: 'violet' },
+  outros:    { rot: 'Não consultadas / erro', desc: 'A consulta não terminou ou deu erro para estas NFs. Use “Consultar de novo”.', cor: 'slate' },
 };
 let ultimoRelatorio = null;
-async function montarRelatorioVinculo(r) {
-  let raizes = null;
+function grupoVinculo(it) {
+  if (temIntegracao(it)) return 'vinculada';
+  if (it.status === 'sem_cte' || it.status === 'nao_localizado') return 'sem_cte';
+  if (it.status === 'pendente' || it.status === 'erro') return 'outros';
+  return 'publico';
+}
+async function raizesIntegradas() {
   try {
     if (!integradas || Date.now() - integradas.em > 120000) { const j = await chamarWorker('/integradas'); integradas = { em: Date.now(), agora: j.agora, lista: j.transportadoras || [] }; }
-    raizes = new Set(integradas.lista.map((t) => raizCnpj(t.cnpj_transp)));
-  } catch (e) { console.warn('[Vínculo] sem lista de integradas', e); }
-  const grupos = { vinculada: [], aguardando: [], nao_integrada: [], sem_transp: [] };
-  for (const d of r.detalhe || []) {
-    const it = itensPorId.get(d.id); if (!it) continue;
-    const cnpj = soDig(it.cnpjTranspNF || it.cnpjTransp);
-    let g;
-    if (temIntegracao(it)) g = 'vinculada';
-    else if (!cnpj) g = 'sem_transp';
-    else if (raizes && raizes.has(raizCnpj(cnpj))) g = 'aguardando';
-    else g = 'nao_integrada';
-    grupos[g].push({ it, situacao: d.situacao });
-  }
-  // NFs que chegaram pela integração e ainda não têm XML (na base carregada)
-  const semXml = itens.filter((i) => temIntegracao(i) && !temXml(i)).length;
-  return { grupos, semXml, semListaIntegradas: !raizes };
+    return new Set(integradas.lista.map((t) => raizCnpj(t.cnpj_transp)));
+  } catch (e) { console.warn('[Vínculo] sem lista de integradas', e); return null; }
 }
-function mostrarRelatorioVinculo(msg, r, rel) {
-  ultimoRelatorio = { r, rel, abaRel: Object.keys(rel.grupos).find((k) => rel.grupos[k].length) || 'vinculada' };
+function classificarRelatorio() {
+  const R = ultimoRelatorio, grupos = { vinculada: [], publico: [], sem_cte: [], outros: [] };
+  for (const d of R.r.detalhe || []) { const it = itensPorId.get(d.id); if (it) grupos[grupoVinculo(it)].push({ it, situacao: d.situacao }); }
+  R.grupos = grupos;
+  R.semXml = itens.filter((i) => temIntegracao(i) && !temXml(i)).length;
+  if (!grupos[R.abaRel] || !grupos[R.abaRel].length) R.abaRel = Object.keys(grupos).find((k) => grupos[k].length) || 'vinculada';
+}
+function transpIntegrada(it) {
+  const raizes = ultimoRelatorio && ultimoRelatorio.raizes; if (!raizes) return '';
+  const c = soDig(it.cnpjTranspNF || it.cnpjTransp); if (!c) return '—';
+  return raizes.has(raizCnpj(c)) || temIntegracao(it) ? 'Sim' : 'Não';
+}
+async function relatorioImportacao(msg, r, arquivos, lidas) {
+  ultimoRelatorio = { r, msg, abaRel: 'vinculada', raizes: await raizesIntegradas(), consultando: false };
+  classificarRelatorio();
+  document.getElementById('modalRelatorio').classList.remove('hidden');
+  // consulta o rastreio público das que não vieram pela integração (pula as consultadas há menos de 2h)
+  const limite = Date.now() - 2 * 3600000;
+  const ids = (r.detalhe || []).map((d) => itensPorId.get(d.id)).filter((it) => it && !temIntegracao(it) && it.status !== 'entregue'
+    && !(it.consultadoEm && new Date(it.consultadoEm).getTime() > limite && it.status !== 'pendente')).map((it) => it.id);
+  if (ids.length) {
+    if (consultando) toast('Já existe uma consulta em andamento; use “Consultar de novo” depois.');
+    else { ultimoRelatorio.consultando = true; renderRelatorio(); await consultar(ids); ultimoRelatorio.consultando = false; }
+  }
+  classificarRelatorio(); renderRelatorio();
+  const g = ultimoRelatorio.grupos;
+  registrarImportacao(arquivos, lidas, r, { vinculadas: g.vinculada.length, rastreioPublico: g.publico.length, semEmissaoCte: g.sem_cte.length, naoConsultadas: g.outros.length });
+}
+function renderRelatorio() {
+  const R = ultimoRelatorio; if (!R) return;
   const n = (v) => Number(v || 0).toLocaleString('pt-BR');
-  const tot = Object.values(rel.grupos).reduce((a, g) => a + g.length, 0);
-  document.getElementById('relResumo').innerHTML = esc(msg.join(' · ')) + '<br>' + esc(resumoImportacao(r)) + '.' +
-    (rel.semListaIntegradas ? '<br><span class="text-amber-700">Não consegui consultar a lista de transportadoras integradas agora; as não vinculadas aparecem como “não integrada”.</span>' : '');
-  document.getElementById('relCards').innerHTML = Object.entries(VINCULO).map(([k, v]) => {
-    const q = rel.grupos[k].length, pct = tot ? Math.round(q / tot * 100) : 0;
-    return `<button data-relaba="${k}" class="text-left rounded-lg border p-3 hover:shadow-sm border-${v.cor}-200 bg-${v.cor}-50">
+  const tot = Object.values(R.grupos).reduce((a, g) => a + g.length, 0);
+  document.getElementById('relResumo').innerHTML = esc(R.msg.join(' · ')) + '<br>' + esc(resumoImportacao(R.r)) + '.';
+  document.getElementById('relProg').classList.toggle('hidden', !R.consultando);
+  document.getElementById('relCards').innerHTML = Object.entries(VINCULO).filter(([k]) => k !== 'outros' || R.grupos.outros.length).map(([k, v]) => {
+    const q = R.grupos[k].length, pct = tot ? Math.round(q / tot * 100) : 0;
+    return `<button data-relaba="${k}" class="text-left rounded-lg border p-3 hover:shadow-sm border-${v.cor}-200 bg-${v.cor}-50 ${R.abaRel === k ? 'ring-2 ring-blue-500' : ''}">
       <div class="text-[11px] text-${v.cor}-800 font-medium">${v.rot}</div>
       <div class="text-2xl font-semibold text-${v.cor}-700">${n(q)} <span class="text-xs font-normal text-slate-500">${pct}%</span></div></button>`;
   }).join('');
-  document.getElementById('relSemXml').textContent = rel.semXml
-    ? `Além disso, ${n(rel.semXml)} NF(s) que chegaram pela integração ainda não têm XML importado (sem cliente, destino e previsão).` : '';
-  document.querySelectorAll('[data-relaba]').forEach((b) => b.onclick = () => { ultimoRelatorio.abaRel = b.dataset.relaba; renderRelatorioAba(); });
-  const naoEnt = (g) => g.filter((x) => x.it.status !== 'entregue').map((x) => x.it.id);
-  const semVinc = naoEnt([...rel.grupos.aguardando, ...rel.grupos.nao_integrada, ...rel.grupos.sem_transp]);
-  const todas = naoEnt(Object.values(rel.grupos).flat());
-  const bSem = document.getElementById('relConsultarSem'), bTodas = document.getElementById('relConsultarTodas');
-  bSem.textContent = `⟳ Consultar na SSW as não vinculadas (${n(semVinc.length)})`; bSem.disabled = !semVinc.length; bSem.onclick = () => { fecharRelatorio(); consultar(semVinc); };
-  bTodas.textContent = `⟳ Consultar todas as não entregues (${n(todas.length)})`; bTodas.disabled = !todas.length; bTodas.onclick = () => { fecharRelatorio(); consultar(todas); };
-  renderRelatorioAba();
-  document.getElementById('modalRelatorio').classList.remove('hidden');
-}
-function renderRelatorioAba() {
-  const { rel, abaRel } = ultimoRelatorio, v = VINCULO[abaRel], lista = rel.grupos[abaRel];
-  document.querySelectorAll('[data-relaba]').forEach((b) => b.classList.toggle('ring-2', b.dataset.relaba === abaRel));
-  document.querySelectorAll('[data-relaba]').forEach((b) => b.classList.toggle('ring-blue-500', b.dataset.relaba === abaRel));
-  // transportadoras do grupo (útil para saber de quem pedir a integração)
+  document.querySelectorAll('[data-relaba]').forEach((b) => b.onclick = () => { R.abaRel = b.dataset.relaba; renderRelatorio(); });
+  document.getElementById('relSemXml').textContent = R.semXml ? `Além disso, ${n(R.semXml)} NF(s) que chegaram pela integração ainda não têm XML importado (sem cliente, destino e previsão).` : '';
+  const reconsultar = [...R.grupos.sem_cte, ...R.grupos.outros].map((x) => x.it.id);
+  const b = document.getElementById('relConsultar');
+  b.textContent = `⟳ Consultar de novo as sem CT-e / não consultadas (${n(reconsultar.length)})`;
+  b.disabled = !reconsultar.length || R.consultando;
+  b.onclick = async () => { R.consultando = true; renderRelatorio(); await consultar(reconsultar); R.consultando = false; classificarRelatorio(); renderRelatorio(); };
+  // lista do grupo escolhido
+  const v = VINCULO[R.abaRel], lista = R.grupos[R.abaRel];
   const porTransp = new Map();
-  for (const { it } of lista) { const k = it.transportadora || nomeTransportadora(it) || '(sem transportadora)'; porTransp.set(k, (porTransp.get(k) || 0) + 1); }
-  const resumoT = [...porTransp.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, q]) => `<span class="inline-block bg-white border border-slate-200 rounded px-2 py-0.5 mr-1 mb-1">${esc(k)} <b>${q}</b></span>`).join('');
+  for (const { it } of lista) { const k = it.transportadora || nomeTransportadora(it) || '(sem transportadora no XML)'; porTransp.set(k, (porTransp.get(k) || 0) + 1); }
+  const chips = [...porTransp.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, q]) => `<span class="inline-block bg-white border border-slate-200 rounded px-2 py-0.5 mr-1 mb-1">${esc(k)} <b>${q}</b></span>`).join('');
+  document.getElementById('relDesc').innerHTML = `<div class="font-medium text-slate-700">${v.rot} — ${n(lista.length)} NF(s)</div><div class="text-slate-500 mb-2">${v.desc}</div>${lista.length ? '<div class="text-xs">' + chips + '</div>' : ''}`;
   const sit = { nova: 'Nova', atualizada: 'Atualizada', igual: 'Já estava igual' };
-  document.getElementById('relDesc').innerHTML = `<div class="font-medium text-slate-700">${v.rot} — ${lista.length.toLocaleString('pt-BR')} NF(s)</div><div class="text-slate-500 mb-2">${v.desc}</div>${lista.length ? '<div class="text-xs">' + resumoT + '</div>' : ''}`;
   document.getElementById('relTbody').innerHTML = lista.slice(0, 300).map(({ it, situacao }) => `<tr class="border-t border-slate-100">
     <td class="px-2 py-1.5 font-medium">${esc(it.nf)}</td>
-    <td class="px-2 py-1.5 truncate max-w-[220px]" title="${esc(it.cliente)}">${esc(it.cliente)}</td>
+    <td class="px-2 py-1.5 truncate max-w-[200px]" title="${esc(it.cliente)}">${esc(it.cliente)}</td>
     <td class="px-2 py-1.5 text-slate-500">${esc(it.cidadeDestino)}</td>
-    <td class="px-2 py-1.5 truncate max-w-[220px]" title="${esc(it.transportadora || nomeTransportadora(it))}">${esc(it.transportadora || nomeTransportadora(it))}</td>
+    <td class="px-2 py-1.5 truncate max-w-[200px]" title="${esc(it.transportadora || nomeTransportadora(it))}">${esc(it.transportadora || nomeTransportadora(it))}</td>
+    <td class="px-2 py-1.5 text-xs">${transpIntegrada(it)}</td>
     <td class="px-2 py-1.5">${badge(it.status)}</td>
     <td class="px-2 py-1.5 text-slate-500 text-xs">${sit[situacao] || ''}</td></tr>`).join('') +
-    (lista.length > 300 ? `<tr><td colspan="6" class="px-2 py-2 text-center text-xs text-slate-400">Mostrando 300 de ${lista.length.toLocaleString('pt-BR')}. Baixe o Excel para ver todas.</td></tr>` : '');
+    (lista.length > 300 ? `<tr><td colspan="7" class="px-2 py-2 text-center text-xs text-slate-400">Mostrando 300 de ${n(lista.length)}. Baixe o Excel para ver todas.</td></tr>` : '');
 }
 function fecharRelatorio() { document.getElementById('modalRelatorio').classList.add('hidden'); }
 function exportarRelatorioVinculo() {
   if (!ultimoRelatorio) return;
   const linhas = [];
-  for (const [k, g] of Object.entries(ultimoRelatorio.rel.grupos)) for (const { it, situacao } of g) linhas.push({
-    'Vínculo': VINCULO[k].rot, 'NF': it.nf, 'Chave': it.chave, 'Pedido': it.pedido || '', 'Cliente': it.cliente || '', 'Destino': it.cidadeDestino || '',
-    'Transportadora (XML)': it.transportadora || '', 'CNPJ transportadora (XML)': it.cnpjTranspNF || '', 'Transportadora (integração)': it.cnpjTransp ? nomeTransportadora({ cnpjTransp: it.cnpjTransp }) : '',
+  for (const [k, g] of Object.entries(ultimoRelatorio.grupos)) for (const { it, situacao } of g) linhas.push({
+    'Resultado': VINCULO[k].rot, 'NF': it.nf, 'Chave': it.chave, 'Pedido': it.pedido || '', 'Cliente': it.cliente || '', 'Destino': it.cidadeDestino || '',
+    'Transportadora (XML)': it.transportadora || '', 'CNPJ transportadora (XML)': it.cnpjTranspNF || '', 'Transportadora integrada': transpIntegrada(it),
     'Status': STATUS[it.status]?.label || it.status, 'Última ocorrência': it.ultOcorrencia || '', 'Na importação': { nova: 'Nova', atualizada: 'Atualizada', igual: 'Já estava igual' }[situacao] || '',
   });
   const ws = XLSX.utils.json_to_sheet(linhas), wb = XLSX.utils.book_new();
@@ -1052,9 +1069,7 @@ async function importarArquivos(arquivos) {
     for (const f of planilhas) { const l = await lerPlanilha(f); lista = lista.concat(l); msg.push(`${l.length} linha(s) de ${f.name}`); }
     if (!lista.length) { toast('Nenhuma NF encontrada nos arquivos.'); return; }
     const r = adicionarItens(lista, xmlZip.length ? 'xml' : 'planilha');
-    const rel = await montarRelatorioVinculo(r);
-    registrarImportacao(arquivos.map((f) => f.name), lista.length, r, rel);
-    mostrarRelatorioVinculo(msg, r, rel);
+    await relatorioImportacao(msg, r, arquivos.map((f) => f.name), lista.length);
   } catch (e) { toast('Erro ao ler arquivo: ' + e.message); }
 }
 
@@ -1107,6 +1122,8 @@ function atualizarProgresso(f, t) {
   document.getElementById('progBar').style.width = pct + '%';
   document.getElementById('progPct').textContent = pct + '%';
   document.getElementById('progTxt').textContent = `Consultando na SSW… ${f} de ${t}`;
+  const rp = document.getElementById('relProgTxt'); if (rp) rp.textContent = `Consultando o rastreio público das NFs que não vieram pela integração… ${f} de ${t} (${pct}%)`;
+  const rb = document.getElementById('relProgBar'); if (rb) rb.style.width = pct + '%';
 }
 
 function aplicarResultado(r) {
