@@ -25,6 +25,7 @@
  *   GET  /ocorrencias?apos_id=N&limite=2000 -> ocorrências recebidas (para o painel, com login)
  *   GET  /ocorrencias?chave=...  (ou nf=...) -> histórico de uma NF
  *   GET  /transportadora?cnpj=...  -> nome da transportadora (BrasilAPI / CNPJ.ws / ReceitaWS)
+ *   GET  /integradas            -> transportadoras que enviam ocorrências pelo SSW2181 (resumo por CNPJ)
  *
  * Banco: Cloudflare D1, vinculado ao Worker com o nome DB (tabela "ocorrencias").
  *
@@ -97,6 +98,25 @@ export default {
         const dados = await buscarCnpj(cnpj);
         if (!dados) return json({ ok: false, erro: 'Não consegui consultar o CNPJ agora (fontes públicas ocupadas). Tente mais tarde ou informe o nome manualmente.' }, 200, cors);
         return json({ ok: true, cnpj, ...dados }, 200, cors);
+      }
+
+      // transportadoras integradas: quem já enviou ocorrências pelo webservice SSW2181
+      if (url.pathname === '/integradas' && request.method === 'GET') {
+        if (!env.DB) return json({ ok: false, erro: 'Banco D1 (DB) não vinculado ao Worker.' }, 500, cors);
+        const desde24h = new Date(Date.now() - 864e5).toISOString();
+        const desde7d = new Date(Date.now() - 7 * 864e5).toISOString();
+        const { results } = await env.DB.prepare(
+          `SELECT cnpj_transp,
+                  MIN(recebido_em) AS primeira, MAX(recebido_em) AS ultima,
+                  COUNT(*) AS ocorrencias,
+                  COUNT(DISTINCT chave_nf) AS nfs,
+                  SUM(recebido_em >= ?) AS ult24h,
+                  COUNT(DISTINCT CASE WHEN recebido_em >= ? THEN chave_nf END) AS nfs7d,
+                  COUNT(DISTINCT CASE WHEN CAST(codigo AS INTEGER) = 1 THEN chave_nf END) AS entregues,
+                  COUNT(DISTINCT CASE WHEN link_comprovante <> '' THEN chave_nf END) AS comprovantes
+             FROM ocorrencias WHERE cnpj_transp <> '' GROUP BY cnpj_transp ORDER BY ultima DESC`
+        ).bind(desde24h, desde7d).all();
+        return json({ ok: true, agora: new Date().toISOString(), transportadoras: results }, 200, cors);
       }
 
       if (url.pathname === '/ocorrencias' && request.method === 'GET') {

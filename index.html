@@ -57,7 +57,15 @@
     </div>
   </header>
 
-  <main class="w-full mx-auto px-4 py-5 space-y-5">
+  <!-- Abas -->
+  <nav class="bg-white border-b border-slate-200">
+    <div class="w-full mx-auto px-4 flex gap-1 text-sm font-medium">
+      <button data-aba="entregas" class="aba px-4 py-2.5 border-b-2 border-blue-600 text-blue-700">📦 Entregas</button>
+      <button data-aba="integradas" class="aba px-4 py-2.5 border-b-2 border-transparent text-slate-500 hover:text-slate-800">🔗 Transportadoras Integradas</button>
+    </div>
+  </nav>
+
+  <main id="abaEntregas" class="w-full mx-auto px-4 py-5 space-y-5">
 
     <!-- Barra de ações -->
     <section class="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-center gap-2">
@@ -125,6 +133,41 @@
       </div>
     </section>
     <p class="text-xs text-slate-400 text-center">Base compartilhada no Firebase com todo o histórico (acesso restrito @grupotbx.com.br). Dados de rastreamento: WebAPI SSW e webservice SSW2181.</p>
+  </main>
+
+  <!-- Aba: Transportadoras Integradas -->
+  <main id="abaIntegradas" class="hidden w-full mx-auto px-4 py-5 space-y-5">
+    <section class="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-center gap-3">
+      <div class="flex-1 min-w-[260px]">
+        <h2 class="font-semibold text-slate-800">Transportadoras Integradas</h2>
+        <p class="text-sm text-slate-500">Transportadoras que enviam ocorrências automaticamente pelo webservice do SSW (opção 2181). Uma transportadora aparece aqui assim que manda a primeira ocorrência.</p>
+      </div>
+      <span id="integAtualizado" class="text-xs text-slate-400"></span>
+      <button id="btnIntegAtualizar" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⟳ Atualizar</button>
+    </section>
+    <section id="integKpis" class="grid grid-cols-2 md:grid-cols-4 gap-3"></section>
+    <section class="bg-white rounded-xl shadow-sm">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-500 text-[11px] uppercase tracking-wide">
+          <tr>
+            <th class="text-left px-3 py-2">Transportadora</th>
+            <th class="text-left px-3 py-2">Situação</th>
+            <th class="text-left px-3 py-2" title="Data da primeira ocorrência recebida">Integrada desde</th>
+            <th class="text-left px-3 py-2" title="Última vez que a transportadora enviou uma ocorrência">Último envio</th>
+            <th class="text-right px-3 py-2" title="NFs com ocorrência recebida nos últimos 7 dias / no total">NFs (7 dias / total)</th>
+            <th class="text-right px-3 py-2" title="Ocorrências recebidas nas últimas 24 horas / no total">Ocorrências (24h / total)</th>
+            <th class="text-right px-3 py-2" title="NFs entregues que vieram com link do comprovante de entrega">Comprovantes</th>
+            <th class="px-3 py-2"></th>
+          </tr>
+        </thead>
+        <tbody id="integTbody"></tbody>
+      </table>
+      <div id="integVazio" class="hidden text-center text-slate-400 py-16">
+        <div class="text-4xl mb-2">🔗</div>
+        Nenhuma transportadora enviou ocorrências pelo SSW ainda.
+      </div>
+    </section>
+    <p class="text-xs text-slate-400 text-center">“Enviando”: mandou ocorrência nas últimas 24 horas. Sem envio há mais de 2 dias pode indicar que a integração parou (ou que não houve movimento).</p>
   </main>
 </div>
 
@@ -372,7 +415,7 @@ async function renomearTransportadora(cnpj) {
   const limpo = nome.trim();
   nomesTransp[cnpj] = limpo || atual;
   try { await db.collection(COL_CONFIG).doc('transportadoras').set({ nomes: { [cnpj]: nomesTransp[cnpj] } }, { merge: true }); } catch (e) { toast('Erro ao salvar: ' + e.message); }
-  render(); if (detalheId) abrirDetalhe(detalheId, false);
+  render(); if (detalheId) abrirDetalhe(detalheId, false); renderIntegradas();
 }
 // CNPJ de empresa é dado público: consulta direto do navegador (CNPJ.ws, BrasilAPI) e, se falhar, pelo Worker
 async function consultarCnpj(c) {
@@ -390,6 +433,89 @@ async function consultarCnpj(c) {
 }
 function nomeTransportadora(it) {
   return it.transportadora || (it.cnpjTransp && nomesTransp[it.cnpjTransp]) || (it.cnpjTransp ? 'CNPJ ' + it.cnpjTransp : '');
+}
+
+/* --- Aba Transportadoras Integradas (resumo vem do Worker/D1: 1 consulta ao abrir a aba) --- */
+let abaAtual = 'entregas', integradas = null, integCarregando = false;
+const tentadosCnpj = new Set();
+const fmtCnpj = (c) => { const d = String(c || '').replace(/\D/g, ''); return d.length === 14 ? `${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}` : (c || ''); };
+function mudarAba(aba) {
+  abaAtual = aba;
+  document.querySelectorAll('.aba').forEach((b) => {
+    const ativa = b.dataset.aba === aba;
+    b.classList.toggle('border-blue-600', ativa); b.classList.toggle('text-blue-700', ativa);
+    b.classList.toggle('border-transparent', !ativa); b.classList.toggle('text-slate-500', !ativa);
+  });
+  document.getElementById('abaEntregas').classList.toggle('hidden', aba !== 'entregas');
+  document.getElementById('abaIntegradas').classList.toggle('hidden', aba !== 'integradas');
+  if (aba === 'integradas' && (!integradas || Date.now() - integradas.em > 120000)) carregarIntegradas();
+}
+async function carregarIntegradas() {
+  if (integCarregando) return;
+  integCarregando = true;
+  document.getElementById('integAtualizado').textContent = 'Carregando…';
+  try {
+    const j = await chamarWorker('/integradas');
+    integradas = { em: Date.now(), agora: j.agora, lista: j.transportadoras || [] };
+    renderIntegradas();
+    // nomes que ainda não estão na tabela (CNPJ de empresa é público)
+    const faltam = integradas.lista.map((t) => t.cnpj_transp).filter((c) => c && !nomesTransp[c] && !tentadosCnpj.has(c)).slice(0, 20);
+    if (faltam.length) {
+      const novos = {};
+      for (const c of faltam) { tentadosCnpj.add(c); const n = await consultarCnpj(c); if (n) novos[c] = n; }
+      if (Object.keys(novos).length) {
+        Object.assign(nomesTransp, novos);
+        try { await db.collection(COL_CONFIG).doc('transportadoras').set({ nomes: novos }, { merge: true }); } catch (e) { console.warn(e); }
+        renderIntegradas(); render();
+      }
+    }
+  } catch (e) {
+    document.getElementById('integAtualizado').textContent = '';
+    toast('Erro ao carregar as transportadoras integradas: ' + e.message);
+  } finally { integCarregando = false; }
+}
+function renderIntegradas() {
+  if (!integradas) return;
+  const lista = integradas.lista;
+  const horas = (iso) => iso ? (Date.now() - new Date(iso)) / 3600000 : Infinity;
+  const ativas = lista.filter((t) => horas(t.ultima) <= 24).length;
+  const tot = (k) => lista.reduce((a, t) => a + (Number(t[k]) || 0), 0);
+  const kpi = (rot, val, sub, cor) => `<div class="bg-white rounded-xl shadow-sm p-4"><div class="text-xs text-slate-500">${rot}</div><div class="text-2xl font-semibold ${cor}">${val}</div><div class="text-[11px] text-slate-400">${sub}</div></div>`;
+  const n = (v) => Number(v || 0).toLocaleString('pt-BR');
+  document.getElementById('integKpis').innerHTML =
+    kpi('Transportadoras integradas', n(lista.length), 'já enviaram ocorrência', 'text-slate-800') +
+    kpi('Enviando agora', n(ativas), 'mandaram ocorrência nas últimas 24h', 'text-emerald-600') +
+    kpi('Ocorrências nas últimas 24h', n(tot('ult24h')), n(tot('ocorrencias')) + ' no total', 'text-blue-700') +
+    kpi('NFs acompanhadas', n(tot('nfs')), n(tot('nfs7d')) + ' com ocorrência nos últimos 7 dias', 'text-slate-800');
+  document.getElementById('integVazio').classList.toggle('hidden', lista.length > 0);
+  document.getElementById('integTbody').innerHTML = lista.map((t) => {
+    const h = horas(t.ultima), dias = Math.floor(h / 24);
+    const sit = h <= 24 ? ['Enviando', 'bg-emerald-100 text-emerald-700']
+      : h <= 48 ? ['Sem envio há 1 dia', 'bg-slate-100 text-slate-600']
+      : h <= 24 * 7 ? [`Sem envio há ${dias} dias`, 'bg-amber-100 text-amber-700']
+      : [`Parada há ${dias} dias`, 'bg-red-100 text-red-700'];
+    const nome = nomesTransp[t.cnpj_transp] || 'CNPJ ' + fmtCnpj(t.cnpj_transp);
+    const ent = Number(t.entregues) || 0, comp = Number(t.comprovantes) || 0;
+    const pct = ent ? Math.round(Math.min(comp, ent) / ent * 100) : null;
+    return `<tr class="border-t border-slate-100 hover:bg-slate-50">
+      <td class="px-3 py-2"><div class="font-medium text-slate-800">${esc(nome)}</div><div class="text-[11px] text-slate-400">${esc(fmtCnpj(t.cnpj_transp))}</div></td>
+      <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${sit[1]}">${sit[0]}</span></td>
+      <td class="px-3 py-2 text-slate-600">${t.primeira ? new Date(t.primeira).toLocaleDateString('pt-BR') : ''}</td>
+      <td class="px-3 py-2 text-slate-600">${esc(fmtData(t.ultima))}</td>
+      <td class="px-3 py-2 text-right tabular-nums">${n(t.nfs7d)} <span class="text-slate-400">/ ${n(t.nfs)}</span></td>
+      <td class="px-3 py-2 text-right tabular-nums">${n(t.ult24h)} <span class="text-slate-400">/ ${n(t.ocorrencias)}</span></td>
+      <td class="px-3 py-2 text-right tabular-nums" title="${n(comp)} com comprovante de ${n(ent)} entregue(s)">${ent ? `${n(Math.min(comp, ent))} de ${n(ent)} <span class="text-slate-400">(${pct}%)</span>` : '<span class="text-slate-400">—</span>'}</td>
+      <td class="px-3 py-2 text-right whitespace-nowrap">
+        <button class="text-blue-600 hover:underline text-xs mr-2" onclick="verNFsTransportadora('${esc(t.cnpj_transp)}')">Ver NFs</button>
+        <button class="text-slate-500 hover:underline text-xs" onclick="renomearTransportadora('${esc(t.cnpj_transp)}')" title="Mudar o nome desta transportadora">✎ renomear</button>
+      </td>
+    </tr>`;
+  }).join('');
+  document.getElementById('integAtualizado').textContent = 'Atualizado às ' + new Date(integradas.em).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+function verNFsTransportadora(cnpj) {
+  document.getElementById('busca').value = cnpj;
+  pagina = 1; mudarAba('entregas'); render();
 }
 
 async function carregarBase() {
@@ -495,6 +621,8 @@ auth.onAuthStateChanged(async (u) => {
     sincronizarOcorrencias();
     clearInterval(window.__syncT); window.__syncT = setInterval(() => sincronizarOcorrencias(), 120000);
     document.getElementById('statusSync').onclick = () => sincronizarOcorrencias(false);
+    document.querySelectorAll('.aba').forEach((b) => b.onclick = () => mudarAba(b.dataset.aba));
+    document.getElementById('btnIntegAtualizar').onclick = () => carregarIntegradas();
   } else {
     if (u) { await auth.signOut(); document.getElementById('msgLogin').textContent = 'Use um e-mail @' + DOMINIO_PERMITIDO; }
     usuario = null;
@@ -1073,7 +1201,7 @@ function render() {
     if (parado && !(i.diasParado != null && i.diasParado > parado)) return false;
     if (soPend && !i.ultPendencia) return false;
     if (soAtraso && !(i.atraso > 0)) return false;
-    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, nomeTransportadora(i), i.chave].join(' ')).includes(q)) return false;
+    if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, nomeTransportadora(i), i.cnpjTransp, i.chave].join(' ')).includes(q)) return false;
     return true;
   });
   const { campo, dir } = ordenacao;
