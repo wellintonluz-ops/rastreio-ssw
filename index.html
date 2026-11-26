@@ -140,7 +140,7 @@
     <section class="bg-white rounded-xl shadow-sm p-4 flex flex-wrap items-center gap-3">
       <div class="flex-1 min-w-[260px]">
         <h2 class="font-semibold text-slate-800">Transportadoras Integradas</h2>
-        <p class="text-sm text-slate-500">Transportadoras que enviam ocorrências automaticamente pelo webservice do SSW (opção 2181). Uma transportadora aparece aqui assim que manda a primeira ocorrência.</p>
+        <p class="text-sm text-slate-500">Transportadoras que enviam ocorrências automaticamente pelo webservice do SSW (opção 2181). Uma transportadora aparece aqui assim que manda a primeira ocorrência. Clique na linha para ver as filiais.</p>
       </div>
       <span id="integAtualizado" class="text-xs text-slate-400"></span>
       <button id="btnIntegAtualizar" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⟳ Atualizar</button>
@@ -388,8 +388,9 @@ function reconstruirLista() { itens = Array.from(itensPorId.values()); }
 /* --- Nomes das transportadoras (webservice manda só o CNPJ) ---
    Tabela em rastreio_config/transportadoras: 1 leitura ao abrir; CNPJ novo = 1 consulta + 1 gravação. */
 let nomesTransp = {};
+let nomesGrupo = {};   // nome da transportadora (empresa), pela raiz do CNPJ — as filiais ficam embaixo
 async function carregarTransportadoras() {
-  try { const d = await db.collection(COL_CONFIG).doc('transportadoras').get(); nomesTransp = (d.exists && d.get('nomes')) || {}; } catch (e) { console.warn(e); }
+  try { const d = await db.collection(COL_CONFIG).doc('transportadoras').get(); nomesTransp = (d.exists && d.get('nomes')) || {}; nomesGrupo = (d.exists && d.get('grupos')) || {}; } catch (e) { console.warn(e); }
 }
 let ultimaTentativaTransp = 0;
 async function completarTransportadoras() {
@@ -474,42 +475,109 @@ async function carregarIntegradas() {
     toast('Erro ao carregar as transportadoras integradas: ' + e.message);
   } finally { integCarregando = false; }
 }
+// Filiais da mesma empresa têm a mesma raiz de CNPJ (8 primeiros dígitos)
+const raizCnpj = (c) => String(c || '').replace(/\D/g, '').slice(0, 8);
+const fmtRaiz = (r) => r.length === 8 ? `${r.slice(0, 2)}.${r.slice(2, 5)}.${r.slice(5, 8)}` : r;
+// nome da empresa: o salvo pelo usuário; senão o menor nome das filiais, sem "(Cidade/UF)" e sem "- UNIDADE ..."
+function nomeDoGrupo(raiz, filiais) {
+  if (nomesGrupo[raiz]) return nomesGrupo[raiz];
+  const nomes = filiais.map((f) => nomesTransp[f.cnpj_transp]).filter(Boolean)
+    .map((n) => n.replace(/\s*\([^()]*\/[A-Z]{2}\)\s*$/i, '').replace(/\s+-\s+(unidade|filial|und\.?)\b.*$/i, '').trim()).filter(Boolean);
+  if (!nomes.length) return 'CNPJ ' + fmtRaiz(raiz);
+  return nomes.sort((a, b) => a.length - b.length || a.localeCompare(b))[0];
+}
+const integAbertas = new Set();
+function alternarGrupo(raiz) { integAbertas.has(raiz) ? integAbertas.delete(raiz) : integAbertas.add(raiz); renderIntegradas(); }
+async function renomearGrupo(raiz) {
+  const filiais = (integradas ? integradas.lista : []).filter((t) => raizCnpj(t.cnpj_transp) === raiz);
+  const atual = nomeDoGrupo(raiz, filiais);
+  const nome = prompt(`Nome da transportadora (todas as filiais da raiz ${fmtRaiz(raiz)}):`, atual);
+  if (nome === null) return;
+  const limpo = nome.trim();
+  if (limpo) nomesGrupo[raiz] = limpo; else delete nomesGrupo[raiz];
+  try { await db.collection(COL_CONFIG).doc('transportadoras').set({ grupos: { [raiz]: limpo ? limpo : firebase.firestore.FieldValue.delete() } }, { merge: true }); } catch (e) { toast('Erro ao salvar: ' + e.message); }
+  renderIntegradas();
+}
 function renderIntegradas() {
   if (!integradas) return;
-  const lista = integradas.lista;
-  const horas = (iso) => iso ? (Date.now() - new Date(iso)) / 3600000 : Infinity;
-  const ativas = lista.filter((t) => horas(t.ultima) <= 24).length;
-  const tot = (k) => lista.reduce((a, t) => a + (Number(t[k]) || 0), 0);
-  const kpi = (rot, val, sub, cor) => `<div class="bg-white rounded-xl shadow-sm p-4"><div class="text-xs text-slate-500">${rot}</div><div class="text-2xl font-semibold ${cor}">${val}</div><div class="text-[11px] text-slate-400">${sub}</div></div>`;
   const n = (v) => Number(v || 0).toLocaleString('pt-BR');
+  const horas = (iso) => iso ? (Date.now() - new Date(iso)) / 3600000 : Infinity;
+  // agrupa as filiais por raiz do CNPJ
+  const mapa = new Map();
+  for (const t of integradas.lista) {
+    const r = raizCnpj(t.cnpj_transp);
+    if (!mapa.has(r)) mapa.set(r, []);
+    mapa.get(r).push(t);
+  }
+  const soma = (fs, k) => fs.reduce((a, f) => a + (Number(f[k]) || 0), 0);
+  const grupos = [...mapa.entries()].map(([raiz, fs]) => {
+    fs.sort((a, b) => (b.ultima || '').localeCompare(a.ultima || ''));
+    return {
+      raiz, filiais: fs, nome: nomeDoGrupo(raiz, fs),
+      primeira: fs.map((f) => f.primeira).filter(Boolean).sort()[0] || '',
+      ultima: fs[0].ultima || '',
+      nfs: soma(fs, 'nfs'), nfs7d: soma(fs, 'nfs7d'), ocorrencias: soma(fs, 'ocorrencias'), ult24h: soma(fs, 'ult24h'),
+      entregues: soma(fs, 'entregues'), comprovantes: soma(fs, 'comprovantes'),
+    };
+  }).sort((a, b) => b.ocorrencias - a.ocorrencias);
+
+  const ativas = grupos.filter((g) => horas(g.ultima) <= 24).length;
+  const filiaisTot = integradas.lista.length;
+  const kpi = (rot, val, sub, cor) => `<div class="bg-white rounded-xl shadow-sm p-4"><div class="text-xs text-slate-500">${rot}</div><div class="text-2xl font-semibold ${cor}">${val}</div><div class="text-[11px] text-slate-400">${sub}</div></div>`;
+  const tot = (k) => grupos.reduce((a, g) => a + g[k], 0);
   document.getElementById('integKpis').innerHTML =
-    kpi('Transportadoras integradas', n(lista.length), 'já enviaram ocorrência', 'text-slate-800') +
+    kpi('Transportadoras integradas', n(grupos.length), `${n(filiaisTot)} filial(is) enviando ocorrências`, 'text-slate-800') +
     kpi('Enviando agora', n(ativas), 'mandaram ocorrência nas últimas 24h', 'text-emerald-600') +
     kpi('Ocorrências nas últimas 24h', n(tot('ult24h')), n(tot('ocorrencias')) + ' no total', 'text-blue-700') +
     kpi('NFs acompanhadas', n(tot('nfs')), n(tot('nfs7d')) + ' com ocorrência nos últimos 7 dias', 'text-slate-800');
-  document.getElementById('integVazio').classList.toggle('hidden', lista.length > 0);
-  document.getElementById('integTbody').innerHTML = lista.map((t) => {
-    const h = horas(t.ultima), dias = Math.floor(h / 24);
-    const sit = h <= 24 ? ['Enviando', 'bg-emerald-100 text-emerald-700']
+  document.getElementById('integVazio').classList.toggle('hidden', grupos.length > 0);
+
+  const situacao = (iso) => {
+    const h = horas(iso), dias = Math.floor(h / 24);
+    return h <= 24 ? ['Enviando', 'bg-emerald-100 text-emerald-700']
       : h <= 48 ? ['Sem envio há 1 dia', 'bg-slate-100 text-slate-600']
       : h <= 24 * 7 ? [`Sem envio há ${dias} dias`, 'bg-amber-100 text-amber-700']
       : [`Parada há ${dias} dias`, 'bg-red-100 text-red-700'];
-    const nome = nomesTransp[t.cnpj_transp] || 'CNPJ ' + fmtCnpj(t.cnpj_transp);
-    const ent = Number(t.entregues) || 0, comp = Number(t.comprovantes) || 0;
-    const pct = ent ? Math.round(Math.min(comp, ent) / ent * 100) : null;
-    return `<tr class="border-t border-slate-100 hover:bg-slate-50">
-      <td class="px-3 py-2"><div class="font-medium text-slate-800">${esc(nome)}</div><div class="text-[11px] text-slate-400">${esc(fmtCnpj(t.cnpj_transp))}</div></td>
-      <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${sit[1]}">${sit[0]}</span></td>
-      <td class="px-3 py-2 text-slate-600">${t.primeira ? new Date(t.primeira).toLocaleDateString('pt-BR') : ''}</td>
-      <td class="px-3 py-2 text-slate-600">${esc(fmtData(t.ultima))}</td>
-      <td class="px-3 py-2 text-right tabular-nums">${n(t.nfs7d)} <span class="text-slate-400">/ ${n(t.nfs)}</span></td>
-      <td class="px-3 py-2 text-right tabular-nums">${n(t.ult24h)} <span class="text-slate-400">/ ${n(t.ocorrencias)}</span></td>
-      <td class="px-3 py-2 text-right tabular-nums" title="${n(comp)} com comprovante de ${n(ent)} entregue(s)">${ent ? `${n(Math.min(comp, ent))} de ${n(ent)} <span class="text-slate-400">(${pct}%)</span>` : '<span class="text-slate-400">—</span>'}</td>
+  };
+  const comprov = (ent, comp) => ent ? `${n(Math.min(comp, ent))} de ${n(ent)} <span class="text-slate-400">(${Math.round(Math.min(comp, ent) / ent * 100)}%)</span>` : '<span class="text-slate-400">—</span>';
+  const colunas = (x) => `
+      <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${situacao(x.ultima)[1]}">${situacao(x.ultima)[0]}</span></td>
+      <td class="px-3 py-2 text-slate-600">${x.primeira ? new Date(x.primeira).toLocaleDateString('pt-BR') : ''}</td>
+      <td class="px-3 py-2 text-slate-600">${esc(fmtData(x.ultima))}</td>
+      <td class="px-3 py-2 text-right tabular-nums">${n(x.nfs7d)} <span class="text-slate-400">/ ${n(x.nfs)}</span></td>
+      <td class="px-3 py-2 text-right tabular-nums">${n(x.ult24h)} <span class="text-slate-400">/ ${n(x.ocorrencias)}</span></td>
+      <td class="px-3 py-2 text-right tabular-nums">${comprov(Number(x.entregues) || 0, Number(x.comprovantes) || 0)}</td>`;
+  const pare = 'event.stopPropagation();';
+
+  document.getElementById('integTbody').innerHTML = grupos.map((g) => {
+    const varias = g.filiais.length > 1, aberta = varias && integAbertas.has(g.raiz);
+    const sub = varias ? `${g.filiais.length} filiais · raiz ${fmtRaiz(g.raiz)}` : fmtCnpj(g.filiais[0].cnpj_transp) + (nomesTransp[g.filiais[0].cnpj_transp] ? ' · ' + nomesTransp[g.filiais[0].cnpj_transp].replace(/^.*\(([^()]*\/[A-Z]{2})\)\s*$/i, '$1') : '');
+    const linha = `<tr class="border-t border-slate-100 ${varias ? 'cursor-pointer hover:bg-blue-50/50' : 'hover:bg-slate-50'} ${aberta ? 'bg-blue-50/40' : ''}" ${varias ? `onclick="alternarGrupo('${g.raiz}')" title="Clique para ${aberta ? 'esconder' : 'ver'} as filiais"` : ''}>
+      <td class="px-3 py-2"><div class="flex items-start gap-2">
+        <span class="w-4 shrink-0 text-slate-400 text-xs mt-0.5">${varias ? (aberta ? '▼' : '▶') : ''}</span>
+        <div><div class="font-medium text-slate-800">${esc(g.nome)}</div><div class="text-[11px] text-slate-400">${esc(sub)}</div></div>
+      </div></td>
+      ${colunas(g)}
       <td class="px-3 py-2 text-right whitespace-nowrap">
-        <button class="text-blue-600 hover:underline text-xs mr-2" onclick="verNFsTransportadora('${esc(t.cnpj_transp)}')">Ver NFs</button>
-        <button class="text-slate-500 hover:underline text-xs" onclick="renomearTransportadora('${esc(t.cnpj_transp)}')" title="Mudar o nome desta transportadora">✎ renomear</button>
+        <button class="text-blue-600 hover:underline text-xs mr-2" onclick="${pare}verNFsTransportadora('${varias ? g.raiz : g.filiais[0].cnpj_transp}')">Ver NFs</button>
+        <button class="text-slate-500 hover:underline text-xs" onclick="${pare}renomearGrupo('${g.raiz}')" title="Mudar o nome desta transportadora">✎ renomear</button>
       </td>
     </tr>`;
+    if (!aberta) return linha;
+    return linha + g.filiais.map((f) => {
+      const nf = nomesTransp[f.cnpj_transp] || '';
+      const local = (nf.match(/\(([^()]*\/[A-Z]{2})\)\s*$/i) || [])[1] || nf || 'CNPJ ' + fmtCnpj(f.cnpj_transp);
+      return `<tr class="bg-slate-50/70 text-[13px]">
+        <td class="px-3 py-1.5"><div class="pl-6 border-l-2 border-blue-200 ml-1.5">
+          <div class="text-slate-700">${esc(local)}</div><div class="text-[11px] text-slate-400">${esc(fmtCnpj(f.cnpj_transp))}${nf && local !== nf ? ' · ' + esc(nf.replace(/\s*\([^()]*\)\s*$/, '')) : ''}</div>
+        </div></td>
+        ${colunas(f)}
+        <td class="px-3 py-1.5 text-right whitespace-nowrap">
+          <button class="text-blue-600 hover:underline text-xs mr-2" onclick="verNFsTransportadora('${esc(f.cnpj_transp)}')">Ver NFs</button>
+          <button class="text-slate-500 hover:underline text-xs" onclick="renomearTransportadora('${esc(f.cnpj_transp)}')" title="Mudar o nome desta filial">✎ renomear</button>
+        </td>
+      </tr>`;
+    }).join('');
   }).join('');
   document.getElementById('integAtualizado').textContent = 'Atualizado às ' + new Date(integradas.em).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
