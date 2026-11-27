@@ -114,11 +114,12 @@
       <div>
         <table class="w-full text-sm table-fixed">
           <colgroup>
-            <col style="width:9%"><col style="width:15%"><col style="width:10%"><col style="width:20%"><col style="width:25%"><col style="width:8%"><col style="width:8%"><col style="width:5%">
+            <col style="width:8%"><col style="width:7%"><col style="width:14%"><col style="width:10%"><col style="width:18%"><col style="width:22%"><col style="width:8%"><col style="width:8%"><col style="width:5%">
           </colgroup>
           <thead class="bg-slate-50 text-slate-500 text-[11px] uppercase tracking-wide">
             <tr>
               <th class="text-left px-2 py-2 sortable" data-sort="nf">NF / Pedido</th>
+              <th class="text-left px-2 py-2 sortable" data-sort="dataEmissao" title="Data de emissão da NF (XML). Sem XML, mostra a emissão do CT-e (ocorrência 80); ao importar o XML passa a ser a da NF.">Emissão</th>
               <th class="text-left px-2 py-2 sortable" data-sort="cliente">Cliente / Destino</th>
               <th class="text-left px-2 py-2 sortable" data-sort="status">Status / Transportadora</th>
               <th class="text-left px-2 py-2 sortable" data-sort="ultPendData" title="Última ocorrência de problema (ausente, recusa, endereço, avaria…), mesmo que já tenha sido resolvida">Última pendência</th>
@@ -347,7 +348,7 @@ const BALDES_POR_MES = 100;
 const LS_PERIODO = 'rastreioSSW.v2.periodo';
 let mesesPeriodo = (() => { try { const v = localStorage.getItem(LS_PERIODO); return v === null ? 3 : Number(v); } catch { return 3; } })(); // 0 = tudo
 const IMPORTAR_A_PARTIR_DE = '2026-11-01'; // importação aceita só NFs emitidas a partir desta data
-const CAMPOS_SALVOS = ['cnpjTranspNF', 'xmlEm', 'nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
+const CAMPOS_SALVOS = ['emissaoCte', 'cnpjTranspNF', 'xmlEm', 'nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
   'origem', 'adicionadoEm', 'adicionadoPor', 'status', 'mensagem', 'erroApi', 'ultOcorrencia', 'ultDescricao', 'ultData', 'ultLocal',
   'ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal', 'qtdPendencias', 'recebedor', 'agendamento', 'linkComprovante',
   'primData', 'consultadoEm', 'fonte', 'qtdWS', 'cnpjTransp'];
@@ -743,7 +744,7 @@ auth.onAuthStateChanged(async (u) => {
     await carregarTransportadoras();
     render();
     completarTransportadoras();
-    sincronizarOcorrencias();
+    sincronizarOcorrencias().then(() => preencherEmissaoCte());
     clearInterval(window.__syncT); window.__syncT = setInterval(() => sincronizarOcorrencias(), 120000);
     document.getElementById('statusSync').onclick = () => sincronizarOcorrencias(false);
     document.querySelectorAll('.aba').forEach((b) => b.onclick = () => mudarAba(b.dataset.aba));
@@ -1206,6 +1207,7 @@ function preservarMaisRecente(it, ant) {
 }
 // Aplica ocorrências novas do webservice sem precisar do histórico completo em memória
 function aplicarEventosWS(it, eventos) {
+  anotarEmissaoCte(it, eventos);
   for (const e of eventos.sort((a, b) => (a.dataISO || '').localeCompare(b.dataISO || ''))) {
     if (!it.ultData || (e.dataISO || '') >= it.ultData) {
       it.ultOcorrencia = e.ocorrencia; it.ultDescricao = e.descricao; it.ultData = e.dataISO; it.ultLocal = '';
@@ -1255,6 +1257,7 @@ function recalcular(it) {
   const comAgenda = [...eventos].reverse().find((e) => e.agendamento);
   it.agendamento = comAgenda ? comAgenda.agendamento : '';
   it.primData = eventos[0] ? eventos[0].dataISO : '';
+  anotarEmissaoCte(it, eventos);
   const pends = eventos.filter(ehPendencia);
   const up = pends[pends.length - 1];
   it.qtdPendencias = pends.length;
@@ -1272,6 +1275,29 @@ function recalcular(it) {
    O cursor fica no Firebase (rastreio_config/ws). Cada lote de ocorrências é gravado na base
    por UM navegador só; os outros recebem a atualização pela própria base. */
 const LS_ULT_OC = 'rastreioSSW.v2.cursorWS';
+// Uma vez por navegador: lê o histórico da integração (banco do Worker) e preenche a emissão do CT-e
+// (ocorrência 80) das NFs que já estavam na base. Só grava as NFs que mudarem.
+async function preencherEmissaoCte() {
+  const FLAG = 'rastreioSSW.v2.emissaoCte|' + workerUrl();
+  try { if (localStorage.getItem(FLAG)) return; } catch {}
+  if (!baseCarregada) return;
+  let apos = 0, mudou = 0;
+  try {
+    for (let volta = 0; volta < 200; volta++) {
+      const j = await chamarWorker(`/ocorrencias?apos_id=${apos}&limite=2000`);
+      for (const o of j.ocorrencias || []) {
+        if (String(Number(o.codigo)) !== '80' || !o.data_evento) continue;
+        const ch = soDig(o.chave);
+        const it = (ch.length === 44 && itensPorId.get(ch)) || itensPorId.get('NF' + o.nf);
+        if (it && (!it.emissaoCte || o.data_evento < it.emissaoCte)) { it.emissaoCte = o.data_evento; mudou++; }
+      }
+      apos = j.ultimo_id || apos;
+      if (!j.mais) break;
+    }
+    try { localStorage.setItem(FLAG, new Date().toISOString()); } catch {}
+    if (mudou) { console.log('[Emissão CT-e] preenchidas', mudou); render(); salvar(); }
+  } catch (e) { console.warn('[Emissão CT-e] não preencheu agora', e); }
+}
 let sincronizando = false, ultimaSync = null;
 async function sincronizarOcorrencias(silencioso = true) {
   if (sincronizando || !usuario || !baseCarregada) return;
@@ -1413,6 +1439,8 @@ const badge = (st) => { const s = STATUS[st] || STATUS.pendente; return `<span c
 
 const fmtDia = (iso) => { if (!iso) return ''; const [a, m, d] = iso.slice(0, 10).split('-'); return d && m && a ? `${d}/${m}/${a}` : iso; };
 function calcularDerivados(it) {
+  // emissão: a da NF (XML); sem XML, a do CT-e (ocorrência 80 — CTRC emitido)
+  it.dataEmissao = (it.emissao || '').slice(0, 19) || it.emissaoCte || '';
   // registros antigos: "não localizada" sem nada da integração = sem emissão de CT-e
   if (it.status === 'nao_localizado' && !it.ultData && !temIntegracao(it)) it.status = 'sem_cte';
   const prev = paraISO(it.previsaoSSW || it.previsao || '');
@@ -1429,6 +1457,16 @@ function calcularDerivados(it) {
   it.diasTotal = it.primData ? Math.max(0, Math.floor((fim - new Date(it.primData)) / 86400000)) : null;
 }
 
+function celulaEmissao(i) {
+  if (i.emissao) return `<div title="Emissão da NF (XML)">${esc(fmtDia(i.emissao.slice(0, 10)))}</div><div class="text-[11px] text-slate-400">NF</div>`;
+  if (i.emissaoCte) return `<div class="text-slate-600" title="Emissão do CT-e (a NF ainda não tem XML). Ao importar o XML, passa a mostrar a emissão da NF.">${esc(fmtDia(i.emissaoCte.slice(0, 10)))}</div><div class="text-[11px] text-amber-600">CT-e</div>`;
+  return '<span class="text-slate-300">—</span>';
+}
+// ocorrência 80 = CTRC/CT-e emitido (não confundir com 93 — emitido para efeito de frete)
+const ehEmissaoCte = (e) => e.codigo === '80' || /^80\s*-|\(80\)\s*$|DOCUMENTO DE TRANSPORTE EMITIDO/i.test(e.ocorrencia || '');
+function anotarEmissaoCte(it, eventos) {
+  for (const e of eventos) if (e.dataISO && ehEmissaoCte(e) && (!it.emissaoCte || e.dataISO < it.emissaoCte)) it.emissaoCte = e.dataISO;
+}
 function marcaVinculo(i) {
   const x = temXml(i), w = temIntegracao(i);
   if (x && w) return ' <span class="text-[10px] font-normal px-1 rounded bg-emerald-100 text-emerald-700" title="XML importado e vinculado às ocorrências da integração">🔗</span>';
@@ -1499,6 +1537,7 @@ function render() {
     const pendAtual = ['ocorrencia', 'devolucao'].includes(i.status);
     return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer align-top" data-id="${i.id}">
       <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}${marcaVinculo(i)}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
+      <td class="px-2 py-2">${celulaEmissao(i)}</td>
       <td class="px-2 py-2"><div class="truncate" title="${esc(i.cliente)}">${esc(i.cliente)}</div><div class="text-[11px] text-slate-400 truncate">${esc(i.cidadeDestino)}</div></td>
       <td class="px-2 py-2">${badge(i.status)}${nomeTransportadora(i) ? `<div class="text-[11px] text-slate-400 truncate mt-1" title="${esc(nomeTransportadora(i))}">${esc(nomeTransportadora(i))}</div>` : ''}</td>
       <td class="px-2 py-2">${i.ultPendencia ? `<div class="line-clamp-2 leading-snug ${pendAtual ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-[11px] text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + 'x' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
@@ -1599,7 +1638,7 @@ function abrirDetalhe(id, buscar = true) {
   document.getElementById('detStatus').innerHTML = badge(it.status);
   const info = [
     ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], 
-    ['Transportadora', nomeTransportadora(it) + (it.cnpjTransp && !nomeTransportadora(it).includes(it.cnpjTransp) ? ' · CNPJ ' + it.cnpjTransp : '')], ['Agendamento', it.agendamento ? fmtData(it.agendamento) : ''], ['Emissão', fmtData(it.emissao)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
+    ['Transportadora', nomeTransportadora(it) + (it.cnpjTransp && !nomeTransportadora(it).includes(it.cnpjTransp) ? ' · CNPJ ' + it.cnpjTransp : '')], ['Agendamento', it.agendamento ? fmtData(it.agendamento) : ''], ['Emissão da NF', it.emissao ? fmtData(it.emissao) : 'sem XML'], ['Emissão do CT-e', fmtData(it.emissaoCte)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
     ['Remetente', it.cabecalho?.remetente], ['Previsão', it.prevISO ? fmtDia(it.prevISO) + (it.atraso > 0 ? ` (${it.atraso}d de atraso)` : '') : ''], ['Recebedor', it.recebedor],
     ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
     ['Dias em trânsito', it.diasTotal != null ? it.diasTotal + ' dia(s)' : ''], ['Consultado em', fmtData(it.consultadoEm)], ['Fonte', it.fonte],
@@ -1656,7 +1695,7 @@ document.getElementById('btnExportar').onclick = () => {
     'NF': i.nf, 'Pedido': i.pedido, 'Chave NF-e': i.chave, 'Cliente': i.cliente, 'Destino': i.cidadeDestino,
     'Status': (STATUS[i.status] || {}).label, 'Última pendência': i.ultPendencia || '', 'Descrição pendência': i.ultPendDescricao || '', 'Data última pendência': fmtData(i.ultPendData), 'Local pendência': i.ultPendLocal || '', 'Qtd. pendências': i.qtdPendencias || 0, 'Última ocorrência': i.ultOcorrencia || i.mensagem || '', 'Descrição': i.ultDescricao || '',
     'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
-    'Transportadora': nomeTransportadora(i), 'CNPJ transportadora': i.cnpjTransp || '', 'Emissão': fmtData(i.emissao), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Agendamento': i.agendamento ? fmtData(i.agendamento) : '', 'Comprovante': i.linkComprovante || '', 'Ocorrências recebidas do SSW': i.qtdWS || 0, 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
+    'Transportadora': nomeTransportadora(i), 'CNPJ transportadora': i.cnpjTransp || '', 'Emissão NF': fmtData(i.emissao), 'Emissão CT-e': fmtData(i.emissaoCte), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Agendamento': i.agendamento ? fmtData(i.agendamento) : '', 'Comprovante': i.linkComprovante || '', 'Ocorrências recebidas do SSW': i.qtdWS || 0, 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
   }));
   const ws = XLSX.utils.json_to_sheet(linhas);
   ws['!cols'] = Object.keys(linhas[0]).map((k) => ({ wch: Math.min(45, Math.max(10, k.length + 2, ...linhas.map((l) => String(l[k] ?? '').length))) }));
