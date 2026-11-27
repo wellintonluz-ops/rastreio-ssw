@@ -387,11 +387,8 @@ function mesDoItem(it) {
 function baldeDoItem(it) { return it._balde || (it._balde = mesDoItem(it) + '-' + String(fnv(it.id) % BALDES_POR_MES).padStart(2, '0')); }
 // Período por data de emissão: atalhos ou datas escolhidas pelo usuário
 const diaLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-let periodo = (() => {
-  try { const v = JSON.parse(localStorage.getItem(LS_PERIODO2) || 'null'); if (v && v.p) return v; } catch {}
-  const antigo = { 1: 'mes', 3: '3m', 6: '6m', 12: '12m', 0: 'tudo' }[mesesPeriodo];
-  return { p: antigo || '3m', de: '', ate: '' };
-})();
+// padrão ao abrir: todo o histórico (o usuário muda se precisar; a escolha não fica salva)
+let periodo = { p: 'tudo', de: '', ate: '' };
 mesesPeriodo = mesesParaCobrir(intervaloPeriodo().de);
 function intervaloPeriodo(pr = periodo) {
   const hoje = new Date(), d = (n) => { const x = new Date(hoje); x.setDate(x.getDate() - n); return diaLocal(x); };
@@ -419,7 +416,6 @@ function mesesParaCobrir(de) {
 }
 async function aplicarPeriodo(novo) {
   periodo = novo;
-  try { localStorage.setItem(LS_PERIODO2, JSON.stringify(periodo)); } catch {}
   document.getElementById('periodoCustom').classList.toggle('hidden', periodo.p !== 'custom');
   document.getElementById('periodoCustom').classList.toggle('flex', periodo.p === 'custom');
   const meses = mesesParaCobrir(intervaloPeriodo().de);
@@ -439,7 +435,6 @@ function emitidaAntesDoInicio(it) {
 // Troca de período: relê do cache do navegador (não conta leitura no Firebase)
 async function mudarPeriodo(meses) {
   mesesPeriodo = meses;
-  try { localStorage.setItem(LS_PERIODO, String(meses)); } catch {}
   itensPorId.clear();
   try {
     const cache = await db.collection(COL_BALDES).get({ source: 'cache' });
