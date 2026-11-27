@@ -1607,28 +1607,7 @@ function atualizarOpcoesTransp() {
 let selecionadas = new Set(), idsFiltrados = [];  // NFs marcadas na tabela / NFs do filtro atual
 function render() {
   itens.forEach(calcularDerivados);
-  // KPIs
-  const cont = {}; for (const k of Object.keys(STATUS)) cont[k] = 0;
-  itens.forEach((i) => cont[i.status] = (cont[i.status] || 0) + 1);
-  const cards = [
-    ['', 'Total', itens.length, 'text-slate-800'],
-    ['entregue', 'Entregues', cont.entregue, 'text-emerald-600'],
-    ['saiu', 'Saiu p/ entrega', cont.saiu, 'text-blue-600'],
-    ['transito', 'Em trânsito', cont.transito, 'text-sky-600'],
-    ['ocorrencia', 'Com ocorrência', cont.ocorrencia + cont.devolucao, 'text-amber-600'],
-    ['sem_cte', 'Sem emissão de CT-e', cont.sem_cte, 'text-violet-600'],
-    ['nao_localizado', 'Não localizadas', cont.nao_localizado + cont.erro, 'text-slate-500'],
-    ['pendente', 'Não consultadas', cont.pendente, 'text-slate-400'],
-  ];
-  document.getElementById('kpis').innerHTML = cards.map(([k, l, v, c]) => `
-    <button data-kpi="${k}" class="chip text-left bg-white rounded-xl shadow-sm p-4 border-2 ${filtroStatus === k ? 'border-blue-500' : 'border-transparent'} hover:border-slate-300">
-      <div class="text-xs text-slate-500">${l}</div>
-      <div class="text-2xl font-semibold ${c}">${v}</div>
-      ${k && itens.length ? `<div class="text-xs text-slate-400">${Math.round((v / itens.length) * 100)}%</div>` : '<div class="text-xs text-transparent">.</div>'}
-    </button>`).join('');
-  document.querySelectorAll('[data-kpi]').forEach((b) => b.onclick = () => { filtroStatus = filtroStatus === b.dataset.kpi ? '' : b.dataset.kpi; pagina = 1; render(); });
-
-  // Filtro
+  // Filtros (todos menos o status, que é o clique no card)
   const q = norm(document.getElementById('busca').value);
   const parado = Number(document.getElementById('filtroParado').value);
   const soPend = document.getElementById('filtroPend').checked;
@@ -1637,13 +1616,9 @@ function render() {
   atualizarOpcoesTransp();
   const transp = document.getElementById('filtroTransp').value;
   const per = intervaloPeriodo();
-  let lista = itens.filter((i) => {
+  const semStatus = itens.filter((i) => {
     if (per.de || per.ate) { const dRef = dataReferencia(i); if (dRef && per.de && dRef < per.de) return false; if (dRef && per.ate && dRef > per.ate) return false; }
     if (transp && grupoTransp(i) !== transp) return false;
-    if (filtroStatus) {
-      const grupo = { ocorrencia: ['ocorrencia', 'devolucao'], nao_localizado: ['nao_localizado', 'erro'] }[filtroStatus] || [filtroStatus];
-      if (!grupo.includes(i.status)) return false;
-    }
     if (parado && !(i.diasParado != null && i.diasParado > parado)) return false;
     if (soPend && !i.ultPendencia) return false;
     if (soAtraso && !(i.atraso > 0)) return false;
@@ -1651,6 +1626,34 @@ function render() {
     if (q && !norm([i.nf, i.pedido, i.cliente, i.cidadeDestino, i.ultOcorrencia, i.ultDescricao, i.ultLocal, i.ultPendencia, i.ultPendDescricao, nomeTransportadora(i), i.cnpjTransp, i.chave].join(' ')).includes(q)) return false;
     return true;
   });
+
+  // KPIs: contam as NFs dos filtros aplicados (período, transportadora, busca…)
+  const cont = {}; for (const k of Object.keys(STATUS)) cont[k] = 0;
+  semStatus.forEach((i) => cont[i.status] = (cont[i.status] || 0) + 1);
+  const totalF = semStatus.length;
+  const filtrando = totalF !== itens.length;
+  const cards = [
+    ['', filtrando ? 'Total no filtro' : 'Total', totalF, 'text-slate-800'],
+    ['entregue', 'Entregues', cont.entregue, 'text-emerald-600'],
+    ['saiu', 'Saiu p/ entrega', cont.saiu, 'text-blue-600'],
+    ['transito', 'Em trânsito', cont.transito, 'text-sky-600'],
+    ['ocorrencia', 'Com ocorrência', cont.ocorrencia + cont.devolucao, 'text-amber-600'],
+    ['sem_cte', 'Sem emissão de CT-e', cont.sem_cte, 'text-violet-600'],
+    ['nao_localizado', 'Não localizadas', cont.nao_localizado + cont.erro, 'text-slate-500'],
+    ['pendente', 'Não consultadas', cont.pendente, 'text-slate-400'],
+  ];
+  const nBR = (v) => Number(v || 0).toLocaleString('pt-BR');
+  document.getElementById('kpis').innerHTML = cards.map(([k, l, v, c]) => `
+    <button data-kpi="${k}" class="chip text-left bg-white rounded-xl shadow-sm p-4 border-2 ${filtroStatus === k ? 'border-blue-500' : 'border-transparent'} hover:border-slate-300">
+      <div class="text-xs text-slate-500">${l}</div>
+      <div class="text-2xl font-semibold ${c}">${nBR(v)}</div>
+      ${k && totalF ? `<div class="text-xs text-slate-400">${Math.round((v / totalF) * 100)}%</div>` : `<div class="text-xs ${filtrando ? 'text-slate-400' : 'text-transparent'}">${filtrando ? 'de ' + nBR(itens.length) + ' na base' : '.'}</div>`}
+    </button>`).join('');
+  document.querySelectorAll('[data-kpi]').forEach((b) => b.onclick = () => { filtroStatus = filtroStatus === b.dataset.kpi ? '' : b.dataset.kpi; pagina = 1; render(); });
+
+  // Status (clique no card)
+  const grupoSt = filtroStatus ? ({ ocorrencia: ['ocorrencia', 'devolucao'], nao_localizado: ['nao_localizado', 'erro'] }[filtroStatus] || [filtroStatus]) : null;
+  let lista = grupoSt ? semStatus.filter((i) => grupoSt.includes(i.status)) : semStatus.slice();
   const { campo, dir } = ordenacao;
   lista.sort((a, b) => {
     let va = a[campo], vb = b[campo];
