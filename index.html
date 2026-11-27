@@ -1576,6 +1576,12 @@ function grupoTransp(i) {
   const n = norm(limparNomeTransp(i.transportadora || nomeTransportadora(i)));
   return n ? 'N' + n : 'SEM';
 }
+// data usada no filtro de período: emissão da NF/CT-e; na falta, 1ª ocorrência, cadastro ou mês da chave
+function dataReferencia(i) {
+  const d = (i.dataEmissao || i.primData || i.adicionadoEm || '').slice(0, 10);
+  if (d) return d;
+  const ch = soDig(i.chave); return ch.length === 44 ? `20${ch.slice(2, 4)}-${ch.slice(4, 6)}-01` : '';
+}
 let assinaturaTransp = '';
 function atualizarOpcoesTransp() {
   const cont = new Map(), nomes = new Map();
@@ -1632,7 +1638,7 @@ function render() {
   const transp = document.getElementById('filtroTransp').value;
   const per = intervaloPeriodo();
   let lista = itens.filter((i) => {
-    if (per.de || per.ate) { const dRef = (i.dataEmissao || i.primData || i.adicionadoEm || '').slice(0, 10); if (per.de && (!dRef || dRef < per.de)) return false; if (per.ate && dRef > per.ate) return false; }
+    if (per.de || per.ate) { const dRef = dataReferencia(i); if (dRef && per.de && dRef < per.de) return false; if (dRef && per.ate && dRef > per.ate) return false; }
     if (transp && grupoTransp(i) !== transp) return false;
     if (filtroStatus) {
       const grupo = { ocorrencia: ['ocorrencia', 'devolucao'], nao_localizado: ['nao_localizado', 'erro'] }[filtroStatus] || [filtroStatus];
