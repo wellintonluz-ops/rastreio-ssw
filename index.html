@@ -74,6 +74,10 @@
         📄 Importar XML / ZIP / Excel
         <input type="file" id="inputArquivo" accept=".xml,.zip,.xlsx,.xls,.csv" multiple class="hidden">
       </label>
+      <label class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 cursor-pointer font-medium" title="Relatório de vendas (Evolução E-commerce): data do pedido, saída da NF, previsão ao cliente, entrada na expedição e romaneio. Salva todas as colunas e cruza com as NFs do painel.">
+        🛒 Importar vendas (Excel)
+        <input type="file" id="inputVendas" accept=".xlsx,.xls,.csv" class="hidden">
+      </label>
       <div class="w-px h-8 bg-slate-200 mx-1"></div>
       <button id="btnAtualizarPend" class="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium">⟳ Atualizar não entregues</button>
       <button id="btnAtualizarTodas" class="px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 font-medium">⟳ Atualizar todas</button>
@@ -213,6 +217,25 @@
     <div class="p-5 border-t border-slate-100 flex justify-end gap-2">
       <button class="px-4 py-2 rounded-lg hover:bg-slate-100" data-fechar="modalAdd">Cancelar</button>
       <button id="btnConfirmarAdd" class="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-medium">Adicionar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL IMPORTAÇÃO DE VENDAS -->
+<div id="modalVendas" class="hidden fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl">
+    <div class="p-4 border-b border-slate-100 flex items-start gap-3">
+      <h3 class="flex-1 font-semibold text-slate-800">Importação do relatório de vendas</h3>
+      <button onclick="document.getElementById('modalVendas').classList.add('hidden')" class="text-slate-400 hover:text-slate-700 text-xl leading-none">✕</button>
+    </div>
+    <div class="p-4 space-y-3 text-sm">
+      <div id="vendProg" class="text-slate-600"></div>
+      <div id="vendCards" class="grid grid-cols-2 md:grid-cols-4 gap-2"></div>
+      <div id="vendDet" class="text-xs text-slate-500 space-y-1"></div>
+    </div>
+    <div class="p-4 border-t border-slate-100 flex flex-wrap gap-2 justify-end">
+      <button id="vendBaixar" class="hidden px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⬇ NFs do relatório que não estão no painel (Excel)</button>
+      <button onclick="document.getElementById('modalVendas').classList.add('hidden')" class="px-4 py-2 rounded-lg bg-slate-800 text-white hover:bg-slate-900 font-medium">Fechar</button>
     </div>
   </div>
 </div>
@@ -364,7 +387,7 @@ const LS_PERIODO = 'rastreioSSW.v2.periodo';
 const LS_PERIODO2 = 'rastreioSSW.v2.periodoEmissao'; // { p: preset, de, ate }
 let mesesPeriodo = (() => { try { const v = localStorage.getItem(LS_PERIODO); return v === null ? 3 : Number(v); } catch { return 3; } })(); // 0 = tudo
 const IMPORTAR_A_PARTIR_DE = '2026-11-01'; // importação aceita só NFs emitidas a partir desta data
-const CAMPOS_SALVOS = ['emissaoCte', 'cnpjTranspNF', 'xmlEm', 'nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
+const CAMPOS_SALVOS = ['dataPedido', 'saidaNF', 'previsaoCliente', 'entradaExpedicao', 'dataRomaneio', 'vendaEm', 'emissaoCte', 'cnpjTranspNF', 'xmlEm', 'nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
   'origem', 'adicionadoEm', 'adicionadoPor', 'status', 'mensagem', 'erroApi', 'ultOcorrencia', 'ultDescricao', 'ultData', 'ultLocal',
   'ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal', 'qtdPendencias', 'recebedor', 'agendamento', 'linkComprovante',
   'primData', 'consultadoEm', 'fonte', 'qtdWS', 'cnpjTransp'];
@@ -812,7 +835,7 @@ auth.onAuthStateChanged(async (u) => {
     limparIgnoradas();
     render();
     completarTransportadoras();
-    sincronizarOcorrencias().then(() => preencherEmissaoCte());
+    sincronizarOcorrencias().then(() => preencherEmissaoCte()).then(() => cruzarVendasPendentes());
     clearInterval(window.__syncT); window.__syncT = setInterval(() => sincronizarOcorrencias(), 120000);
     document.getElementById('statusSync').onclick = () => sincronizarOcorrencias(false);
     document.querySelectorAll('.aba').forEach((b) => b.onclick = () => mudarAba(b.dataset.aba));
@@ -1096,6 +1119,7 @@ async function relatorioImportacao(msg, r, arquivos, lidas) {
   ultimoRelatorio.salvando = false; ultimoRelatorio.salvo = salvo;
   const ref = await registrarImportacao(arquivos, lidas, r);
   ultimoRelatorio.raizes = await raizesIntegradas();
+  cruzarVendasPendentes((r.detalhe || []).map((d) => itensPorId.get(d.id)).filter(Boolean));
   renderRelatorio();
   // 2º consulta o rastreio público das que não vieram pela integração (pula as consultadas há menos de 2h)
   const limite = Date.now() - 2 * 3600000;
@@ -1163,6 +1187,153 @@ function exportarRelatorioVinculo() {
   XLSX.writeFile(wb, `vinculo_importacao_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.xlsx`);
 }
 
+/* ===================== RELATÓRIO DE VENDAS (Evolução E-commerce) =====================
+   Guarda TODAS as colunas do relatório (menos o telefone do cliente — LGPD) no Firestore, para upgrades futuros
+   sem reimportar. Coleção rastreio_vendas: 1 documento por faixa de 200 números de NF (v-<nf/200>);
+   cada NF = 1 texto JSON { cab: colunas da NF, itens: [SKU, Família, Qtd, valores] }.
+   Hoje o painel usa: data do pedido (K), saída da NF (L), previsão ao cliente (M), entrada na expedição (N), romaneio (O). */
+const COL_VENDAS = 'rastreio_vendas';
+const VENDAS_FAIXA = 200;
+const COLUNAS_ITEM_VENDA = ['sku', 'familia', 'qtd', 'valorunitario', 'valortotaldoitem'];
+const COLUNAS_FORA_VENDA = ['telefone']; // dado pessoal do cliente: não é gravado
+const DATAS_VENDA = [ // campo no painel, cabeçalho no relatório, letra de reserva
+  ['dataPedido', 'datadopedido', 10], ['saidaNF', 'saidadanf', 11], ['previsaoCliente', 'previsaodeentrega', 12],
+  ['entradaExpedicao', 'entradanaexpedicao', 13], ['dataRomaneio', 'datadoromaneio', 14],
+];
+const nfNum = (v) => String(v ?? '').replace(/\D/g, '').replace(/^0+/, '');
+const faixaVenda = (nf) => 'v-' + Math.floor(Number(nf) / VENDAS_FAIXA);
+const dataBR = (v) => { const m = String(v || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; };
+const vendasCache = new Map();      // nf → { cab, itens } (o que já foi lido do Firestore nesta sessão)
+const faixasLidas = new Set();       // faixas já lidas do Firestore nesta sessão
+
+async function lerFaixasVendas(faixas) {
+  const faltam = [...faixas].filter((f) => !faixasLidas.has(f));
+  for (let i = 0; i < faltam.length; i += 30) {
+    await Promise.all(faltam.slice(i, i + 30).map(async (f) => {
+      try {
+        const d = await db.collection(COL_VENDAS).doc(f).get();
+        faixasLidas.add(f);
+        for (const [nf, txt] of Object.entries((d.exists && d.get('nfs')) || {})) { try { vendasCache.set(nf, { txt, v: JSON.parse(txt) }); } catch {} }
+      } catch (e) { console.warn('[Vendas] não li', f, e); }
+    }));
+  }
+}
+// copia as datas do relatório para a NF do painel; devolve true se mudou algo
+function aplicarVendaNaNF(it, v) {
+  let mudou = false;
+  for (const [campo] of DATAS_VENDA) { const val = (v.datas || {})[campo] || ''; if (val && it[campo] !== val) { it[campo] = val; mudou = true; } }
+  if (!it.vendaEm) { it.vendaEm = new Date().toISOString(); mudou = true; }
+  return mudou;
+}
+function lerPlanilhaVendas(buf) {
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const linhas = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+  const cab = (linhas[0] || []).map((h) => String(h).trim());
+  const ncab = cab.map(norm);
+  const iNF = ncab.indexOf('nf') >= 0 ? ncab.indexOf('nf') : 0;
+  const iTransp = ncab.indexOf('transportadoradanf');
+  const idxData = DATAS_VENDA.map(([campo, h, letra]) => [campo, ncab.indexOf(h) >= 0 ? ncab.indexOf(h) : letra]);
+  const porNF = new Map(); let lidas = 0, ignoradas = 0; const ignoradasNF = new Set();
+  for (const l of linhas.slice(1)) {
+    const nf = nfNum(l[iNF]); if (!nf) continue;
+    lidas++;
+    if (iTransp >= 0 && transpIgnorada({ transportadora: l[iTransp] })) { ignoradasNF.add(nf); continue; }
+    if (!porNF.has(nf)) {
+      const c = {};
+      cab.forEach((h, j) => { const k = ncab[j]; if (!h || COLUNAS_ITEM_VENDA.includes(k) || COLUNAS_FORA_VENDA.includes(k)) return; c[h] = l[j] ?? ''; });
+      const datas = {}; for (const [campo, j] of idxData) { const d = dataBR(l[j]); if (d) datas[campo] = d; }
+      porNF.set(nf, { cab: c, datas, itens: [] });
+    }
+    const item = {}; cab.forEach((h, j) => { if (COLUNAS_ITEM_VENDA.includes(ncab[j])) item[h] = l[j] ?? ''; });
+    porNF.get(nf).itens.push(item);
+  }
+  ignoradas = ignoradasNF.size;
+  return { porNF, lidas, ignoradas, colunas: cab.filter((h, j) => h && !COLUNAS_FORA_VENDA.includes(ncab[j])) };
+}
+async function importarVendas(arquivo) {
+  if (!arquivo) return;
+  if (!baseCarregada) { toast('Aguarde a base terminar de carregar para importar.'); return; }
+  const prog = (t) => { document.getElementById('vendProg').textContent = t; };
+  document.getElementById('vendCards').innerHTML = ''; document.getElementById('vendDet').innerHTML = ''; document.getElementById('vendBaixar').classList.add('hidden');
+  document.getElementById('modalVendas').classList.remove('hidden');
+  try {
+    prog('Lendo a planilha…');
+    const { porNF, lidas, ignoradas, colunas } = lerPlanilhaVendas(await arquivo.arrayBuffer());
+    if (!porNF.size) { prog('Não encontrei NFs na planilha (coluna "NF").'); return; }
+    // 1) grava o relatório completo (só o que for novo ou mudou)
+    prog(`Comparando ${porNF.size.toLocaleString('pt-BR')} NFs com o que já está salvo…`);
+    const faixas = new Set([...porNF.keys()].map(faixaVenda));
+    await lerFaixasVendas(faixas);
+    const agora = new Date().toISOString();
+    const porFaixa = new Map(); let novas = 0, atualizadas = 0, iguais = 0;
+    for (const [nf, v] of porNF) {
+      const txt = JSON.stringify({ cab: v.cab, datas: v.datas, itens: v.itens });
+      const ant = vendasCache.get(nf);
+      if (ant && ant.txt === txt) { iguais++; continue; }
+      ant ? atualizadas++ : novas++;
+      const f = faixaVenda(nf);
+      if (!porFaixa.has(f)) porFaixa.set(f, { nfs: {}, bytes: 0 });
+      const g = porFaixa.get(f); g.nfs[nf] = txt; g.bytes += txt.length + 16;
+      vendasCache.set(nf, { txt, v: { cab: v.cab, datas: v.datas, itens: v.itens } });
+    }
+    const envios = []; let atual = [], bytes = 0;
+    for (const [f, g] of porFaixa) { if (atual.length >= 400 || bytes + g.bytes > 3e6) { envios.push(atual); atual = []; bytes = 0; } atual.push([f, g]); bytes += g.bytes; }
+    if (atual.length) envios.push(atual);
+    let feitos = 0;
+    for (const env of envios) {
+      const batch = db.batch();
+      for (const [f, g] of env) batch.set(db.collection(COL_VENDAS).doc(f), { nfs: g.nfs, atualizadoEm: firebase.firestore.FieldValue.serverTimestamp(), atualizadoPor: usuario.email }, { merge: true });
+      await batch.commit();
+      feitos += env.reduce((a, [, g]) => a + Object.keys(g.nfs).length, 0);
+      prog(`Salvando o relatório no Firebase… ${feitos.toLocaleString('pt-BR')} de ${(novas + atualizadas).toLocaleString('pt-BR')}`);
+    }
+    // 2) cruza com as NFs do painel pelo número da NF
+    prog('Cruzando com as NFs do painel…');
+    const sitePorNF = new Map(); for (const it of itens) { const n = nfNum(it.nf); if (n) { if (!sitePorNF.has(n)) sitePorNF.set(n, []); sitePorNF.get(n).push(it); } }
+    let cruzadas = 0, nfsAtualizadas = 0; const semNoPainel = [];
+    for (const [nf, v] of porNF) {
+      const alvo = sitePorNF.get(nf);
+      if (!alvo) { semNoPainel.push([nf, v]); continue; }
+      cruzadas++;
+      for (const it of alvo) if (aplicarVendaNaNF(it, v)) nfsAtualizadas++;
+    }
+    render();
+    await gravarAlteracoes();
+    try { await db.collection(COL_IMPORT).add({ tipo: 'vendas', em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email, arquivos: [arquivo.name], linhas: lidas, nfs: porNF.size, novas, atualizadas, semMudanca: iguais, cruzadasComPainel: cruzadas, semNoPainel: semNoPainel.length, transportadoraIgnorada: ignoradas }); } catch (e) { console.warn(e); }
+    // 3) resultado
+    const n = (x) => x.toLocaleString('pt-BR');
+    const card = (rot, v, cor) => `<div class="rounded-lg border p-3 border-${cor}-200 bg-${cor}-50"><div class="text-[11px] text-${cor}-800 font-medium">${rot}</div><div class="text-2xl font-semibold text-${cor}-700">${n(v)}</div></div>`;
+    prog(`✅ ${n(lidas)} linha(s) lidas, ${n(porNF.size)} NF(s). Relatório salvo no Firebase.`);
+    document.getElementById('vendCards').innerHTML = card('Cruzadas com o painel', cruzadas, 'emerald') + card('NFs do painel atualizadas', nfsAtualizadas, 'blue') + card('Não estão no painel', semNoPainel.length, 'amber') + card('Ignoradas (EBAZAR)', ignoradas, 'slate');
+    document.getElementById('vendDet').innerHTML = `<div>Gravação do relatório: ${n(novas)} NF(s) nova(s), ${n(atualizadas)} atualizada(s), ${n(iguais)} já estavam iguais.</div>
+      <div>Colunas guardadas (${colunas.length}): ${esc(colunas.join(', '))}. O telefone do cliente não é gravado (LGPD).</div>
+      <div>As NFs que ainda não estão no painel recebem as datas sozinhas quando o XML for importado ou a integração mandar a 1ª ocorrência.</div>`;
+    if (semNoPainel.length) {
+      const b = document.getElementById('vendBaixar'); b.classList.remove('hidden');
+      b.onclick = () => {
+        const ws = XLSX.utils.json_to_sheet(semNoPainel.map(([nf, v]) => ({ NF: nf, ...v.cab })));
+        const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Fora do painel');
+        XLSX.writeFile(wb, `vendas_fora_do_painel_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      };
+    }
+  } catch (e) { console.error(e); prog('❌ Erro na importação: ' + e.message); }
+}
+// NFs que entraram no painel depois do relatório (XML ou integração): busca as datas no relatório salvo
+let cruzandoVendas = false;
+async function cruzarVendasPendentes(lista) {
+  if (cruzandoVendas || !db || !usuario) return;
+  const alvo = (lista || itens).filter((it) => !it.vendaEm && nfNum(it.nf));
+  if (!alvo.length) return;
+  cruzandoVendas = true;
+  try {
+    await lerFaixasVendas(new Set(alvo.map((it) => faixaVenda(nfNum(it.nf)))));
+    let mudou = 0;
+    for (const it of alvo) { const c = vendasCache.get(nfNum(it.nf)); if (c && aplicarVendaNaNF(it, c.v)) mudou++; }
+    if (mudou) { render(); salvar(); console.log('[Vendas] datas aplicadas em', mudou, 'NF(s)'); }
+  } finally { cruzandoVendas = false; }
+}
+
 async function importarArquivos(arquivos) {
   arquivos = [...arquivos];
   if (!arquivos.length) return;
@@ -1185,6 +1356,7 @@ async function importarArquivos(arquivos) {
 }
 
 document.getElementById('inputArquivo').onchange = (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; importarArquivos(fs); };
+document.getElementById('inputVendas').onchange = (ev) => { const f = ev.target.files[0]; ev.target.value = ''; importarVendas(f); };
 // arrastar e soltar arquivos em qualquer lugar da página
 document.addEventListener('dragover', (e) => { if (usuario) { e.preventDefault(); document.body.classList.add('ring-4', 'ring-blue-400', 'ring-inset'); } });
 document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('ring-4', 'ring-blue-400', 'ring-inset'); });
@@ -1711,7 +1883,7 @@ function render() {
       <td class="px-2 py-2">${badge(i.status)}${nomeTransportadora(i) ? `<div class="text-[11px] text-slate-400 truncate mt-1" title="${esc(nomeTransportadora(i))}">${esc(nomeTransportadora(i))}</div>` : ''}</td>
       <td class="px-2 py-2">${i.ultPendencia ? `<div class="line-clamp-2 leading-snug ${pendAtual ? 'text-amber-700 font-medium' : 'text-slate-500'}" title="${esc(i.ultPendencia + (i.ultPendDescricao ? ' — ' + i.ultPendDescricao : ''))}">${esc(i.ultPendencia)}</div><div class="text-[11px] text-slate-400 truncate">${fmtData(i.ultPendData)}${i.qtdPendencias > 1 ? ' · ' + i.qtdPendencias + 'x' : ''}</div>` : '<span class="text-slate-300">—</span>'}</td>
       <td class="px-2 py-2"><div class="line-clamp-2 leading-snug" title="${esc((i.ultOcorrencia || i.mensagem || '') + (i.ultDescricao ? ' — ' + i.ultDescricao : ''))}">${esc(i.ultOcorrencia || i.mensagem || '')}</div><div class="text-[11px] text-slate-400 truncate" title="${esc(i.ultLocal)}">${fmtData(i.ultData)}${i.ultLocal ? ' · ' + esc(i.ultLocal) : ''}</div></td>
-      <td class="px-2 py-2 whitespace-nowrap">${i.prevISO ? `<div class="${i.atraso > 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmtDia(i.prevISO)}</div>${i.atraso > 0 ? `<div class="text-[11px] text-red-500">${i.status === 'entregue' ? 'entregue ' : ''}+${i.atraso}d atraso</div>` : ''}` : ''}</td>
+      <td class="px-2 py-2 whitespace-nowrap">${i.prevISO ? `<div class="${i.atraso > 0 ? 'text-red-600 font-semibold' : 'text-slate-600'}">${fmtDia(i.prevISO)}</div>${i.atraso > 0 ? `<div class="text-[11px] text-red-500">${i.status === 'entregue' ? 'entregue ' : ''}+${i.atraso}d atraso</div>` : ''}` : ''}${i.previsaoCliente ? `<div class="text-[11px] text-slate-400" title="Previsão de entrega prometida ao cliente (relatório de vendas)">cliente ${fmtDia(i.previsaoCliente)}</div>` : ''}</td>
       <td class="px-2 py-2 text-right whitespace-nowrap"><div class="${alerta}" title="Dias desde a última ocorrência">${i.diasParado != null ? i.diasParado + 'd parado' : ''}</div><div class="text-[11px] text-slate-400" title="Dias desde a primeira ocorrência">${i.diasTotal != null ? i.diasTotal + 'd total' : ''}</div></td>
       <td class="px-1 py-2 whitespace-nowrap text-right">
         <button class="text-slate-400 hover:text-emerald-600 px-1" data-acao="atualizar" title="Consultar agora${i.consultadoEm ? ' (última: ' + fmtData(i.consultadoEm) + ')' : ''}">⟳</button>
@@ -1830,7 +2002,7 @@ function abrirDetalhe(id, buscar = true) {
   const info = [
     ['Cliente', it.cliente], ['Destino', it.cidadeDestino], ['Pedido', it.pedido], 
     ['Transportadora', nomeTransportadora(it) + (it.cnpjTransp && !nomeTransportadora(it).includes(it.cnpjTransp) ? ' · CNPJ ' + it.cnpjTransp : '')], ['Agendamento', it.agendamento ? fmtData(it.agendamento) : ''], ['Emissão da NF', it.emissao ? fmtData(it.emissao) : 'sem XML'], ['Emissão do CT-e', fmtData(it.emissaoCte)], ['Valor NF', it.valor ? 'R$ ' + Number(it.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : ''],
-    ['Remetente', it.cabecalho?.remetente], ['Previsão', it.prevISO ? fmtDia(it.prevISO) + (it.atraso > 0 ? ` (${it.atraso}d de atraso)` : '') : ''], ['Recebedor', it.recebedor],
+    ['Remetente', it.cabecalho?.remetente], ['Previsão', it.prevISO ? fmtDia(it.prevISO) + (it.atraso > 0 ? ` (${it.atraso}d de atraso)` : '') : ''], ['Previsão ao cliente (vendas)', fmtDia(it.previsaoCliente)], ['Data do pedido', fmtDia(it.dataPedido)], ['Saída da NF', fmtDia(it.saidaNF)], ['Entrada na expedição', fmtDia(it.entradaExpedicao)], ['Data do romaneio', fmtDia(it.dataRomaneio)], ['Recebedor', it.recebedor],
     ['Última pendência', it.ultPendencia ? it.ultPendencia + ' — ' + fmtData(it.ultPendData) + (it.ultPendLocal ? ' · ' + it.ultPendLocal : '') : ''],
     ['Dias em trânsito', it.diasTotal != null ? it.diasTotal + ' dia(s)' : ''], ['Consultado em', fmtData(it.consultadoEm)], ['Fonte', it.fonte],
   ].filter(([, v]) => v);
@@ -1912,7 +2084,7 @@ document.getElementById('btnExportar').onclick = () => {
     'NF': i.nf, 'Pedido': i.pedido, 'Chave NF-e': i.chave, 'Cliente': i.cliente, 'Destino': i.cidadeDestino,
     'Status': (STATUS[i.status] || {}).label, 'Última pendência': i.ultPendencia || '', 'Descrição pendência': i.ultPendDescricao || '', 'Data última pendência': fmtData(i.ultPendData), 'Local pendência': i.ultPendLocal || '', 'Qtd. pendências': i.qtdPendencias || 0, 'Última ocorrência': i.ultOcorrencia || i.mensagem || '', 'Descrição': i.ultDescricao || '',
     'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
-    'Transportadora': nomeTransportadora(i), 'CNPJ transportadora': i.cnpjTransp || '', 'Emissão NF': fmtData(i.emissao), 'Emissão CT-e': fmtData(i.emissaoCte), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Agendamento': i.agendamento ? fmtData(i.agendamento) : '', 'Comprovante': i.linkComprovante || '', 'Ocorrências recebidas do SSW': i.qtdWS || 0, 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
+    'Transportadora': nomeTransportadora(i), 'CNPJ transportadora': i.cnpjTransp || '', 'Emissão NF': fmtData(i.emissao), 'Emissão CT-e': fmtData(i.emissaoCte), 'Valor NF': i.valor ? Number(i.valor) : '', 'Previsão': fmtDia(i.prevISO), 'Dias de atraso': i.atraso || '', 'Data do pedido': fmtDia(i.dataPedido), 'Saída da NF': fmtDia(i.saidaNF), 'Previsão ao cliente': fmtDia(i.previsaoCliente), 'Entrada na expedição': fmtDia(i.entradaExpedicao), 'Data do romaneio': fmtDia(i.dataRomaneio), 'Agendamento': i.agendamento ? fmtData(i.agendamento) : '', 'Comprovante': i.linkComprovante || '', 'Ocorrências recebidas do SSW': i.qtdWS || 0, 'Recebedor': i.recebedor || '', 'Consultado em': fmtData(i.consultadoEm),
   }));
   const ws = XLSX.utils.json_to_sheet(linhas);
   ws['!cols'] = Object.keys(linhas[0]).map((k) => ({ wch: Math.min(45, Math.max(10, k.length + 2, ...linhas.map((l) => String(l[k] ?? '').length))) }));
