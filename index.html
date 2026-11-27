@@ -1292,10 +1292,12 @@ function preservarMaisRecente(it, ant) {
     const base = ['pendente', 'erro', 'sem_cte', 'nao_localizado'].includes(statusNovo) ? '' : statusNovo;
     it.status = proximoStatus(base, { ocorrencia: ant.ultOcorrencia || '', descricao: ant.ultDescricao || '' });
   }
-  if (ant.ultPendData && (!it.ultPendData || ant.ultPendData > it.ultPendData)) {
+  // só preserva a pendência anterior se, pelas regras atuais, ela ainda for pendência
+  const antAindaPend = ant.ultPendencia && ehPendencia({ ocorrencia: ant.ultPendencia, descricao: ant.ultPendDescricao || '', tipo: '' });
+  if (antAindaPend && ant.ultPendData && (!it.ultPendData || ant.ultPendData > it.ultPendData)) {
     for (const c of ['ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal']) it[c] = ant[c];
   }
-  it.qtdPendencias = Math.max(it.qtdPendencias || 0, ant.qtdPendencias || 0);
+  if (antAindaPend) it.qtdPendencias = Math.max(it.qtdPendencias || 0, ant.qtdPendencias || 0);
   it.qtdWS = Math.max(it.qtdWS || 0, ant.qtdWS || 0);
   for (const c of ['recebedor', 'agendamento', 'linkComprovante', 'cnpjTransp']) if (!it[c] && ant[c]) it[c] = ant[c];
   if (ant.primData && (!it.primData || ant.primData < it.primData)) it.primData = ant.primData;
