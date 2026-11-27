@@ -1526,7 +1526,7 @@ function classificar(ev) {
   if (/anexadocomprovante|comprovanteanexad|comprovantedeentregacomplementar|imagemdocomprovante|digitalizacaodocomprovante|previsaodeentregaatualizada|previsaoatualizada|^atualizacaodeentrega/.test(t)) return 'info';
   if (/devolu|retornoaoremetente|devolvid/.test(t)) return 'devolucao';
   if (/(mercadoriaentregue|entregarealizada|entregue)/.test(t) && !/naoentregue|parcial|entregueparcial/.test(t)) return 'entregue';
-  if (/naoentregue|naoefetuad|prejudicad|parcial|recus|extravi|avari|sinistr|ausente|naolocaliz|enderecoincorreto|enderecoinsuficiente|fechado|retid|bloque|reentrega|insucesso|falta|roubo|aguardando|agendamento|pendencia|impedimento|naoatendid|reclamacao|mercadoriaemanalise|indeniz|sobradevolume|sobrademercadoria|tentativadeentrega|cancelad|estorno|desconhecid|barrad|entregaagendada|agendad|mercadoriadevolvid|desacordo|ruralzona|zonarural|arearisco|areaderisco/.test(t) || /pendencia/.test(tipo)) return 'ocorrencia';
+  if (/naoentregue|naoefetuad|prejudicad|parcial|recus|extravi|avari|sinistr|ausente|naolocaliz|enderecoincorreto|enderecoinsuficiente|fechado|retid|bloque|reentrega|insucesso|falta|roubo|aguardando|agendamento|pendencia|impedimento|naoatendid|reclamacao|mercadoriaemanalise|indeniz|sobradevolume|sobrademercadoria|tentativadeentrega|cancelad|estorno|desconhecid|notabarrad|entregaagendad|mercadoriadevolvid|desacordo|ruralzona|zonarural|arearisco|areaderisco/.test(t) || /pendencia/.test(tipo)) return 'ocorrencia';
   if (/saidaparaentrega|saiuparaentrega|emrotadeentrega|emrotaentrega|emtransitoparaentrega|saidaentrega|rotadeentrega/.test(t)) return 'saiu';
   return 'transito';
 }
