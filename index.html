@@ -1285,7 +1285,12 @@ function aplicarResultado(r) {
 // O resumo salvo pode ter ocorrências do webservice que não estão em memória: mantém o que for mais recente
 function preservarMaisRecente(it, ant) {
   if (ant.ultData && (!it.ultData || ant.ultData > it.ultData)) {
+    const statusNovo = it.status;
     for (const c of ['ultOcorrencia', 'ultDescricao', 'ultData', 'ultLocal', 'status', 'mensagem']) it[c] = ant[c];
+    // a ocorrência mais nova (da integração) é aplicada sobre o status do histórico: informativo não muda nada,
+    // e depois de Entregue só devolução/estorno mudam
+    const base = ['pendente', 'erro', 'sem_cte', 'nao_localizado'].includes(statusNovo) ? '' : statusNovo;
+    it.status = proximoStatus(base, { ocorrencia: ant.ultOcorrencia || '', descricao: ant.ultDescricao || '' });
   }
   if (ant.ultPendData && (!it.ultPendData || ant.ultPendData > it.ultPendData)) {
     for (const c of ['ultPendencia', 'ultPendDescricao', 'ultPendData', 'ultPendLocal']) it[c] = ant[c];
