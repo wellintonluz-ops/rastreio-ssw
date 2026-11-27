@@ -214,6 +214,7 @@
         <div id="relProgTxt" class="text-xs text-slate-600 mb-1">Consultando o rastreio público…</div>
         <div class="h-2 bg-slate-100 rounded-full overflow-hidden"><div id="relProgBar" class="h-full bg-blue-500 w-0 transition-all"></div></div>
       </div>
+      <p id="relAviso" class="text-xs text-slate-600"></p>
       <div id="relCards" class="grid grid-cols-2 md:grid-cols-4 gap-2"></div>
       <p id="relSemXml" class="text-xs text-slate-500"></p>
       <div id="relDesc" class="text-sm bg-slate-50 rounded-lg p-3"></div>
@@ -389,15 +390,10 @@ async function mudarPeriodo(meses) {
   reconstruirLista(); pagina = 1; render(); atualizarStatusBase();
 }
 function resumo(it) { const r = {}; for (const c of CAMPOS_SALVOS) { const v = it[c]; if (v !== undefined && v !== null && v !== '') r[c] = v; } return r; }
-function diferenca(antes, depois) {
-  const d = {}; const del = firebase.firestore.FieldValue.delete();
-  for (const c of CAMPOS_SALVOS) {
-    const a = antes[c], b = depois[c];
-    if (b === undefined) { if (a !== undefined) d[c] = del; }
-    else if (a !== b) d[c] = b;
-  }
-  return d;
-}
+// Cada NF é gravada como 1 texto (JSON) dentro do balde: poucos campos por documento (limite do Firestore
+// de 20 mil campos / 40 mil índices por documento) e gravação só quando o texto muda.
+// Registros antigos (gravados como mapa) continuam sendo lidos normalmente.
+const empacotar = (it) => JSON.stringify(resumo(it));
 function iniciarBanco() {
   if (db) return;
   db = firebase.firestore();
@@ -409,13 +405,15 @@ function aplicarBalde(doc) {
   if ((dados.mes || doc.id.slice(0, 6)) < mesCorte()) return;
   const nfs = dados.nfs || {};
   const noBalde = new Set(Object.keys(nfs));
-  for (const [id, r] of Object.entries(nfs)) {
+  for (const [id, v] of Object.entries(nfs)) {
     if (removidosPendentes.has(id)) continue;
+    let r = v;
+    if (typeof v === 'string') { try { r = JSON.parse(v); } catch { continue; } }
     let it = itensPorId.get(id);
     if (!it) { it = { id }; itensPorId.set(id, it); }
     for (const c of CAMPOS_SALVOS) { if (c in r) it[c] = r[c]; else delete it[c]; }
     it._balde = doc.id;
-    it._salvo = resumo(it);
+    it._salvo = empacotar(it);
   }
   // NFs que estavam neste balde e foram removidas por outra pessoa
   for (const it of itensPorId.values()) if (it._balde === doc.id && it._salvo && !noBalde.has(it.id)) itensPorId.delete(it.id);
@@ -653,45 +651,67 @@ async function carregarBase() {
 }
 
 // Grava só o que mudou: 1 operação por balde. Chamado com atraso para juntar várias mudanças.
-function salvar() { clearTimeout(gravacaoT); if (!adiarGravacao) gravacaoT = setTimeout(gravarAlteracoes, 1200); }
-async function gravarAlteracoes() {
-  if (!db || !usuario) return;
-  if (gravando) { salvar(); return; }
+function salvar() { clearTimeout(gravacaoT); if (!adiarGravacao) gravacaoT = setTimeout(() => gravarAlteracoes(), 1200); }
+let ultimaGravacao = 0;
+// Grava só as NFs que mudaram, agrupadas por balde. Cada envio ao Firestore tem no máximo ~3 MB e 400 documentos
+// (o limite do Firestore é 10 MB por envio). Devolve true se gravou tudo.
+async function gravarAlteracoes(aoProgredir) {
+  if (!db || !usuario) return false;
+  if (gravando) { regravarDepois(); return false; }
   gravando = true;
   const porBalde = new Map();
   for (const it of itens) {
-    const r = resumo(it);
-    const d = diferenca(it._salvo || {}, r);
-    if (!Object.keys(d).length) continue;
+    const txt = empacotar(it);
+    if (txt === it._salvo) continue;
     const b = baldeDoItem(it);
-    if (!porBalde.has(b)) porBalde.set(b, {});
-    porBalde.get(b)[it.id] = it._salvo ? d : r;
-    it._salvo = r;
+    if (!porBalde.has(b)) porBalde.set(b, { nfs: {}, bytes: 0, its: [] });
+    const g = porBalde.get(b);
+    g.nfs[it.id] = txt; g.bytes += txt.length + it.id.length + 8; g.its.push([it, txt]);
   }
   const remocoes = new Map(removidosPendentes); removidosPendentes.clear();
-  if (!porBalde.size && !remocoes.size) { gravando = false; return; }
+  if (!porBalde.size && !remocoes.size) { gravando = false; return true; }
+  const totalNFs = [...porBalde.values()].reduce((a, g) => a + g.its.length, 0);
   atualizarStatusBase('salvando');
-  try {
-    const ts = firebase.firestore.FieldValue.serverTimestamp();
-    const ops = [];
-    for (const [b, nfs] of porBalde) ops.push((batch) => batch.set(db.collection(COL_BALDES).doc(b), { nfs, mes: b.slice(0, 6), atualizadoEm: ts }, { merge: true }));
-    for (const [id, b] of remocoes) ops.push((batch) => batch.update(db.collection(COL_BALDES).doc(b), { ['nfs.' + id]: firebase.firestore.FieldValue.delete(), atualizadoEm: ts }));
-    for (let i = 0; i < ops.length; i += 400) {
-      const batch = db.batch();
-      ops.slice(i, i + 400).forEach((f) => f(batch));
-      await batch.commit();
-    }
-    atualizarStatusBase();
-  } catch (e) {
-    console.error('[Base] erro ao gravar', e);
-    // volta o estado para tentar de novo depois
-    for (const [b, nfs] of porBalde) for (const id of Object.keys(nfs)) { const it = itensPorId.get(id); if (it) it._salvo = null; }
-    for (const [id, b] of remocoes) removidosPendentes.set(id, b);
-    atualizarStatusBase('erro', e.message);
-    toast('Não consegui gravar no Firebase: ' + e.message + '. Vou tentar de novo.');
-    setTimeout(salvar, 30000);
-  } finally { gravando = false; }
+  const ts = firebase.firestore.FieldValue.serverTimestamp();
+  // monta os envios: até 400 documentos e ~3 MB cada
+  const envios = []; let atual = { ops: [], bytes: 0, its: [] };
+  const fechar = () => { if (atual.ops.length) envios.push(atual); atual = { ops: [], bytes: 0, its: [] }; };
+  for (const [b, g] of porBalde) {
+    if (atual.ops.length >= 400 || atual.bytes + g.bytes > 3e6) fechar();
+    atual.ops.push((batch) => batch.set(db.collection(COL_BALDES).doc(b), { nfs: g.nfs, mes: b.slice(0, 6), atualizadoEm: ts }, { merge: true }));
+    atual.bytes += g.bytes; atual.its.push(...g.its);
+  }
+  for (const [id, b] of remocoes) {
+    if (atual.ops.length >= 400) fechar();
+    atual.ops.push((batch) => batch.update(db.collection(COL_BALDES).doc(b), { ['nfs.' + id]: firebase.firestore.FieldValue.delete(), atualizadoEm: ts }));
+  }
+  fechar();
+  let gravadas = 0, falhou = null;
+  for (const env of envios) {
+    try {
+      const batch = db.batch(); env.ops.forEach((f) => f(batch)); await batch.commit();
+      for (const [it, txt] of env.its) it._salvo = txt;
+      gravadas += env.its.length;
+      if (aoProgredir) aoProgredir(gravadas, totalNFs);
+    } catch (e) { console.error('[Base] erro ao gravar', e); falhou = e; }
+  }
+  gravando = false;
+  if (falhou) {
+    for (const [id, b] of remocoes) removidosPendentes.set(id, b); // (remoções: tenta de novo junto)
+    atualizarStatusBase('erro', falhou.message);
+    toast('Não consegui gravar parte das NFs no Firebase: ' + falhou.message + '. Vou tentar de novo em 30 s.');
+    setTimeout(() => gravarAlteracoes(), 30000);
+    return false;
+  }
+  ultimaGravacao = Date.now();
+  atualizarStatusBase();
+  return true;
 }
+function regravarDepois() { clearTimeout(gravacaoT); gravacaoT = setTimeout(() => gravarAlteracoes(), 1500); }
+// avisa antes de fechar a página se ainda há NFs sem gravar ou consulta em andamento
+window.addEventListener('beforeunload', (e) => {
+  if (gravando || consultando || itens.some((it) => empacotar(it) !== it._salvo)) { e.preventDefault(); e.returnValue = ''; }
+});
 function removerItem(id) {
   const it = itensPorId.get(id); if (!it) return;
   if (it._salvo) removidosPendentes.set(id, baldeDoItem(it));
@@ -841,10 +861,10 @@ function resumoImportacao(r) {
 }
 async function registrarImportacao(arquivos, lidas, r, rel) {
   try {
-    await db.collection(COL_IMPORT).add({ em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email,
+    return await db.collection(COL_IMPORT).add({ em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email,
       arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo, foraDoPeriodo: r.foraDoPeriodo || 0,
       ...(rel || {}) });
-  } catch (e) { console.warn('[Importação] não registrou o histórico', e); }
+  } catch (e) { console.warn('[Importação] não registrou o histórico', e); return null; }
 }
 
 function interpretarTexto(txt) {
@@ -987,10 +1007,20 @@ function transpIntegrada(it) {
   return raizes.has(raizCnpj(c)) || temIntegracao(it) ? 'Sim' : 'Não';
 }
 async function relatorioImportacao(msg, r, arquivos, lidas) {
-  ultimoRelatorio = { r, msg, abaRel: 'vinculada', raizes: await raizesIntegradas(), consultando: false };
+  ultimoRelatorio = { r, msg, abaRel: 'vinculada', raizes: null, consultando: false, salvando: true };
   classificarRelatorio();
   document.getElementById('modalRelatorio').classList.remove('hidden');
-  // consulta o rastreio público das que não vieram pela integração (pula as consultadas há menos de 2h)
+  renderRelatorio();
+  // 1º grava as NFs importadas (antes de qualquer consulta) e registra a importação
+  clearTimeout(gravacaoT);
+  const progSalvar = (f, t) => { const p = t ? Math.round(f / t * 100) : 0; document.getElementById('relProgTxt').textContent = `Salvando as NFs no Firebase… ${f.toLocaleString('pt-BR')} de ${t.toLocaleString('pt-BR')} (${p}%)`; document.getElementById('relProgBar').style.width = p + '%'; };
+  let salvo = await gravarAlteracoes(progSalvar);
+  for (let t = 0; !salvo && t < 3; t++) { await new Promise((res) => setTimeout(res, 3000)); salvo = await gravarAlteracoes(progSalvar); }
+  ultimoRelatorio.salvando = false; ultimoRelatorio.salvo = salvo;
+  const ref = await registrarImportacao(arquivos, lidas, r);
+  ultimoRelatorio.raizes = await raizesIntegradas();
+  renderRelatorio();
+  // 2º consulta o rastreio público das que não vieram pela integração (pula as consultadas há menos de 2h)
   const limite = Date.now() - 2 * 3600000;
   const ids = (r.detalhe || []).map((d) => itensPorId.get(d.id)).filter((it) => it && !temIntegracao(it) && it.status !== 'entregue'
     && !(it.consultadoEm && new Date(it.consultadoEm).getTime() > limite && it.status !== 'pendente')).map((it) => it.id);
@@ -1000,14 +1030,18 @@ async function relatorioImportacao(msg, r, arquivos, lidas) {
   }
   classificarRelatorio(); renderRelatorio();
   const g = ultimoRelatorio.grupos;
-  registrarImportacao(arquivos, lidas, r, { vinculadas: g.vinculada.length, rastreioPublico: g.publico.length, semEmissaoCte: g.sem_cte.length, naoConsultadas: g.outros.length });
+  if (ref) try { await ref.update({ vinculadas: g.vinculada.length, rastreioPublico: g.publico.length, semEmissaoCte: g.sem_cte.length, naoConsultadas: g.outros.length }); } catch (e) { console.warn(e); }
 }
 function renderRelatorio() {
   const R = ultimoRelatorio; if (!R) return;
   const n = (v) => Number(v || 0).toLocaleString('pt-BR');
   const tot = Object.values(R.grupos).reduce((a, g) => a + g.length, 0);
   document.getElementById('relResumo').innerHTML = esc(R.msg.join(' · ')) + '<br>' + esc(resumoImportacao(R.r)) + '.';
-  document.getElementById('relProg').classList.toggle('hidden', !R.consultando);
+  document.getElementById('relProg').classList.toggle('hidden', !R.consultando && !R.salvando);
+  document.getElementById('relAviso').innerHTML = R.salvando ? '⏳ Salvando as NFs no Firebase — <b>não feche a página</b> até terminar.'
+    : R.salvo === false ? '<span class="text-red-700">⚠ Parte das NFs ainda não foi gravada no Firebase. O painel continua tentando sozinho — não feche a página.</span>'
+    : R.consultando ? '✅ NFs salvas. A consulta do rastreio público continua; pode fechar este relatório, mas <b>mantenha a página aberta</b> até terminar (o resultado vai sendo gravado a cada ~1,5 min; o que não terminar fica “Não consultada” e entra no ⟳ Atualizar não entregues).'
+    : '✅ NFs salvas no Firebase.';
   document.getElementById('relCards').innerHTML = Object.entries(VINCULO).filter(([k]) => k !== 'outros' || R.grupos.outros.length).map(([k, v]) => {
     const q = R.grupos[k].length, pct = tot ? Math.round(q / tot * 100) : 0;
     return `<button data-relaba="${k}" class="text-left rounded-lg border p-3 hover:shadow-sm border-${v.cor}-200 bg-${v.cor}-50 ${R.abaRel === k ? 'ring-2 ring-blue-500' : ''}">
@@ -1087,11 +1121,14 @@ async function consultar(ids) {
   if (!alvo.length) { toast('Nada para consultar.'); return; }
   consultando = true; adiarGravacao = true;
   const prog = document.getElementById('progresso'); prog.classList.remove('hidden');
-  let feitos = 0, erroGeral = null;
+  let feitos = 0, erroGeral = null, parar = false, ultimoFlush = Date.now();
   atualizarProgresso(0, alvo.length);
-  try {
-    for (let i = 0; i < alvo.length; i += LOTE) {
-      const lote = alvo.slice(i, i + LOTE);
+  const lotes = [];
+  for (let i = 0; i < alvo.length; i += LOTE) lotes.push(alvo.slice(i, i + LOTE));
+  let prox = 0, ultimoRender = 0;
+  const trabalhador = async () => {
+    while (!parar && prox < lotes.length) {
+      const lote = lotes[prox++];
       try {
         const j = await chamarWorker('/rastrear', {
           method: 'POST',
@@ -1101,15 +1138,20 @@ async function consultar(ids) {
       } catch (e) {
         erroGeral = e.message;
         for (const it of lote) { if (!it.ultData) { it.status = 'erro'; it.mensagem = e.message; } }
-        if (/login|sess|token|restrito/i.test(e.message)) break;
+        if (/login|sess|token|restrito/i.test(e.message)) parar = true;
       }
       feitos += lote.length;
       atualizarProgresso(feitos, alvo.length);
-      render();
-      if ((i / LOTE) % 40 === 39) await gravarAlteracoes(); // a cada ~480 NFs, grava o que já foi consultado
+      if (Date.now() - ultimoRender > 1500) { ultimoRender = Date.now(); render(); }
+      // grava o que já foi consultado a cada ~90 s (poucas gravações, nada se perde se a página fechar)
+      if (Date.now() - ultimoFlush > 90000 && !gravando) { ultimoFlush = Date.now(); await gravarAlteracoes(); }
     }
+  };
+  try {
+    await Promise.all([trabalhador(), trabalhador(), trabalhador()]); // 3 lotes de 12 por vez
   } finally {
     consultando = false; adiarGravacao = false;
+    render();
     await gravarAlteracoes();
     setTimeout(() => prog.classList.add('hidden'), 800);
     if (detalheId) abrirDetalhe(detalheId);
@@ -1272,7 +1314,7 @@ async function sincronizarOcorrencias(silencioso = true) {
           return true;
         });
         if (souEu) await gravarAlteracoes();
-        else tocados.forEach((_, it) => { it._salvo = resumo(it); }); // outro navegador já gravou
+        else tocados.forEach((_, it) => { it._salvo = empacotar(it); }); // outro navegador já gravou
         aposId = novoId;
       }
       try { localStorage.setItem(LS_ULT_OC + '|' + workerUrl(), String(aposId)); } catch {}
