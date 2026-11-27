@@ -1299,9 +1299,12 @@ function preservarMaisRecente(it, ant) {
 function aplicarEventosWS(it, eventos) {
   anotarEmissaoCte(it, eventos);
   for (const e of eventos.sort((a, b) => (a.dataISO || '').localeCompare(b.dataISO || ''))) {
+    const statusAntes = ['pendente', 'erro', 'sem_cte', 'nao_localizado'].includes(it.status) ? '' : it.status;
     if (!it.ultData || (e.dataISO || '') >= it.ultData) {
       it.ultOcorrencia = e.ocorrencia; it.ultDescricao = e.descricao; it.ultData = e.dataISO; it.ultLocal = '';
-      it.status = classificar(e); it.mensagem = ''; it.erroApi = '';
+      it.status = proximoStatus(statusAntes, e); it.mensagem = ''; it.erroApi = '';
+    } else if (classificar(e) === 'entregue' && statusAntes !== 'devolucao') {
+      it.status = 'entregue'; // a entrega chegou depois de uma ocorrência mais nova (ex.: comprovante anexado)
     }
     if (ehPendencia(e)) {
       if (!e.versao) it.qtdPendencias = (it.qtdPendencias || 0) + 1; // reenvio atualizado não conta de novo
@@ -1356,7 +1359,7 @@ function recalcular(it) {
   it.ultPendData = up ? up.dataISO : '';
   it.ultPendLocal = up ? up.local : '';
   it.qtdWS = ws.length;
-  if (ult) { it.status = classificar(ult); it.mensagem = ''; }
+  if (ult) { it.status = statusDosEventos(eventos); it.mensagem = ''; }
   // nada na integração e nada no rastreio do SSW: a transportadora ainda não emitiu o CT-e desta NF
   else if (it.erroApi) { it.status = /nenhum|nao localiz|não localiz|not found/i.test(it.erroApi) ? (temIntegracao(it) ? 'nao_localizado' : 'sem_cte') : 'erro'; it.mensagem = it.erroApi; }
 }
@@ -1514,11 +1517,31 @@ function ehPendencia(ev) {
 function classificar(ev) {
   const t = norm(ev.ocorrencia + ' ' + ev.descricao);
   const tipo = norm(ev.tipo);
+  // informativos: não mudam o status (ex.: comprovante anexado depois da entrega, previsão atualizada)
+  if (/anexadocomprovante|comprovanteanexad|comprovantedeentregacomplementar|imagemdocomprovante|digitalizacaodocomprovante|previsaodeentregaatualizada|previsaoatualizada/.test(t)) return 'info';
   if (/devolu|retornoaoremetente|devolvid/.test(t)) return 'devolucao';
   if (/(mercadoriaentregue|entregarealizada|entregue)/.test(t) && !/naoentregue|parcial|entregueparcial/.test(t)) return 'entregue';
   if (/naoentregue|naoefetuad|prejudicad|parcial|recus|extravi|avari|sinistr|ausente|naolocaliz|enderecoincorreto|enderecoinsuficiente|fechado|retid|bloque|reentrega|insucesso|falta|roubo|aguardando|agendamento|pendencia|impedimento|naoatendid|reclamacao|mercadoriaemanalise|mercadoriadevolvid|desacordo|ruralzona|zonarural|arearisco|areaderisco/.test(t) || /pendencia/.test(tipo)) return 'ocorrencia';
   if (/saidaparaentrega|saiuparaentrega|emrotadeentrega|emrotaentrega|emtransitoparaentrega|saidaentrega|rotadeentrega/.test(t)) return 'saiu';
   return 'transito';
+}
+
+// Status a partir da sequência de ocorrências: informativos não mudam nada, e depois de ENTREGUE
+// só uma devolução ou um estorno da baixa tiram a NF de "Entregue".
+function proximoStatus(atual, ev) {
+  const c = classificar(ev);
+  if (c === 'info') return atual || 'transito';
+  if (atual === 'entregue') {
+    if (c === 'devolucao') return 'devolucao';
+    if (/estorno/.test(norm(ev.ocorrencia + ' ' + ev.descricao))) return 'ocorrencia';
+    return 'entregue';
+  }
+  return c;
+}
+function statusDosEventos(eventos) {
+  let st = '';
+  for (const e of eventos) st = proximoStatus(st, e);
+  return st || 'transito';
 }
 
 /* ===================== RENDER ===================== */
@@ -1809,7 +1832,7 @@ function abrirDetalhe(id, buscar = true) {
   const evs = (it._historicoCompleto || (it.eventos || []).length ? (it.eventos || []) : []).slice().reverse();
   if (buscar && !it._historicoCompleto && !evs.length) { document.getElementById('overlayDet').classList.remove('hidden'); document.getElementById('drawer').classList.remove('translate-x-full'); return; }
   document.getElementById('detTimeline').innerHTML = evs.length ? evs.map((e, idx) => {
-    const st = STATUS[classificar(e)];
+    const st = STATUS[classificar(e)] || STATUS.transito;
     return `<li class="ml-5">
       <span class="absolute -left-[7px] mt-1 tl-dot ${idx === 0 ? st.dot : 'bg-slate-300'} ring-4 ring-white"></span>
       <div class="text-xs text-slate-500">${fmtData(e.dataISO)}${e.local ? ' · ' + esc(e.local) : ''}${e.fonte === 'ssw' ? ' <span class="ml-1 text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded" title="Recebida direto do SSW da transportadora (webservice SSW2181)">SSW</span>' : ''}</div>
