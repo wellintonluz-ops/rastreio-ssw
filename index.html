@@ -682,9 +682,12 @@ async function gravarAlteracoes(aoProgredir) {
     atual.ops.push((batch) => batch.set(db.collection(COL_BALDES).doc(b), { nfs: g.nfs, mes: b.slice(0, 6), atualizadoEm: ts }, { merge: true }));
     atual.bytes += g.bytes; atual.its.push(...g.its);
   }
-  for (const [id, b] of remocoes) {
+  const remPorBalde = new Map();
+  for (const [id, b] of remocoes) { if (!remPorBalde.has(b)) remPorBalde.set(b, []); remPorBalde.get(b).push(id); }
+  for (const [b, lista] of remPorBalde) {
     if (atual.ops.length >= 400) fechar();
-    atual.ops.push((batch) => batch.update(db.collection(COL_BALDES).doc(b), { ['nfs.' + id]: firebase.firestore.FieldValue.delete(), atualizadoEm: ts }));
+    const upd = { atualizadoEm: ts }; for (const id of lista) upd['nfs.' + id] = firebase.firestore.FieldValue.delete();
+    atual.ops.push((batch) => batch.update(db.collection(COL_BALDES).doc(b), upd));
   }
   fechar();
   let gravadas = 0, falhou = null;
@@ -713,10 +716,20 @@ function regravarDepois() { clearTimeout(gravacaoT); gravacaoT = setTimeout(() =
 window.addEventListener('beforeunload', (e) => {
   if (gravando || consultando || itens.some((it) => empacotar(it) !== it._salvo)) { e.preventDefault(); e.returnValue = ''; }
 });
-function removerItem(id) {
+function removerItem(id, emLote = false) {
   const it = itensPorId.get(id); if (!it) return;
   if (it._salvo) removidosPendentes.set(id, baldeDoItem(it));
-  itensPorId.delete(id); reconstruirLista(); render(); salvar();
+  itensPorId.delete(id);
+  if (!emLote) { reconstruirLista(); render(); salvar(); }
+}
+// tira da base as NFs de transportadoras ignoradas (roda ao abrir; não mexe nas que têm ocorrência da integração)
+function limparIgnoradas() {
+  const fora = itens.filter((it) => transpIgnorada(it) && !temIntegracao(it));
+  if (!fora.length) return;
+  fora.forEach((it) => removerItem(it.id, true));
+  reconstruirLista(); render(); salvar();
+  console.log('[Base] removidas NFs de transportadora ignorada:', fora.length);
+  toast(`${fora.length.toLocaleString('pt-BR')} NF(s) da ${TRANSP_IGNORADAS.map((t) => t.rotulo).join(' / ')} retiradas da base.`);
 }
 function atualizarStatusBase(estado, msg) {
   const el = document.getElementById('statusBase'); if (!el) return;
@@ -742,6 +755,7 @@ auth.onAuthStateChanged(async (u) => {
     verificarWorker();
     await carregarBase();
     await carregarTransportadoras();
+    limparIgnoradas();
     render();
     completarTransportadoras();
     sincronizarOcorrencias().then(() => preencherEmissaoCte());
@@ -812,19 +826,26 @@ function novoItem(dados) {
   return it;
 }
 
+// Transportadoras que NÃO entram no painel (nem na importação, nem na base). Ex.: EBAZAR = Mercado Livre/Mercado Envios.
+const TRANSP_IGNORADAS = [{ nome: /EBAZAR/i, raiz: '03007331', rotulo: 'EBAZAR.COM.BR' }];
+function transpIgnorada(d) {
+  const raiz = soDig(d.cnpjTranspNF || '').slice(0, 8);
+  return TRANSP_IGNORADAS.find((t) => (raiz && raiz === t.raiz) || t.nome.test(d.transportadora || '')) || null;
+}
 // NF tem dados da integração (ocorrências enviadas pela transportadora via SSW2181)?
 const temIntegracao = (it) => (it.qtdWS || 0) > 0 || it.origem === 'ssw';
 const temXml = (it) => !!it.xmlEm || it.origem === 'xml';
 // Importa sem duplicar: mesma chave = mesmo registro. Se algum dado mudou, atualiza só ele.
 // detalhe: uma linha por NF do arquivo, dizendo se ela casou com dados da integração
 function adicionarItens(lista, origem = 'manual') {
-  let novos = 0, atualizados = 0, iguais = 0, repetidosNoArquivo = 0, convertidos = 0, foraDoPeriodo = 0;
+  let novos = 0, atualizados = 0, iguais = 0, repetidosNoArquivo = 0, convertidos = 0, foraDoPeriodo = 0, ignoradas = 0;
   const ids = [], vistos = new Set(), detalhe = [];
   const agoraISO = new Date().toISOString();
   for (const d of lista) {
     const cand = novoItem({ ...d, origem });
     if (!cand.id) continue;
     if (origem !== 'ssw' && emitidaAntesDoInicio(cand)) { foraDoPeriodo++; continue; }
+    if (origem !== 'ssw' && transpIgnorada(cand) && !(itensPorId.get(cand.id) && temIntegracao(itensPorId.get(cand.id)))) { ignoradas++; continue; }
     if (vistos.has(cand.id)) { repetidosNoArquivo++; continue; }
     vistos.add(cand.id);
     let ex = itensPorId.get(cand.id), situacao;
@@ -853,17 +874,18 @@ function adicionarItens(lista, origem = 'manual') {
     detalhe.push({ id: ex.id, situacao, vinculada: temIntegracao(ex) });
   }
   reconstruirLista(); salvar(); render();
-  return { ids, novos, atualizados, iguais, repetidosNoArquivo, convertidos, foraDoPeriodo, detalhe };
+  return { ids, novos, atualizados, iguais, repetidosNoArquivo, convertidos, foraDoPeriodo, ignoradas, detalhe };
 }
 function resumoImportacao(r) {
   return `${r.novos} NF(s) nova(s)` + (r.atualizados ? `, ${r.atualizados} já existiam e foram atualizadas` : '') +
     (r.iguais ? `, ${r.iguais} já existiam sem mudança (não duplicadas)` : '') + (r.repetidosNoArquivo ? `, ${r.repetidosNoArquivo} repetida(s) no próprio arquivo` : '') +
-    (r.foraDoPeriodo ? `, ${r.foraDoPeriodo} ignorada(s) por serem emitidas antes de ${IMPORTAR_A_PARTIR_DE.split('-').reverse().join('/')}` : '');
+    (r.foraDoPeriodo ? `, ${r.foraDoPeriodo} ignorada(s) por serem emitidas antes de ${IMPORTAR_A_PARTIR_DE.split('-').reverse().join('/')}` : '') +
+    (r.ignoradas ? `, ${r.ignoradas} ignorada(s) por serem da ${TRANSP_IGNORADAS.map((t) => t.rotulo).join(' / ')}` : '');
 }
 async function registrarImportacao(arquivos, lidas, r, rel) {
   try {
     return await db.collection(COL_IMPORT).add({ em: firebase.firestore.FieldValue.serverTimestamp(), por: usuario.email,
-      arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo, foraDoPeriodo: r.foraDoPeriodo || 0,
+      arquivos: arquivos.slice(0, 50), lidas, novas: r.novos, atualizadas: r.atualizados, semMudanca: r.iguais, repetidasNoArquivo: r.repetidosNoArquivo, foraDoPeriodo: r.foraDoPeriodo || 0, transportadoraIgnorada: r.ignoradas || 0,
       ...(rel || {}) });
   } catch (e) { console.warn('[Importação] não registrou o histórico', e); return null; }
 }
