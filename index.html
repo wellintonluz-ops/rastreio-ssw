@@ -81,7 +81,7 @@
         <button id="btnAtualizarSel" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-medium"></button>
         <button id="btnLimparSel" class="text-xs text-blue-700 hover:underline px-1">limpar seleção</button>
       </span>
-      <button id="btnExportar" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⬇ Exportar Excel</button>
+      <button id="btnExportar" title="Exporta as NFs do filtro atual" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⬇ Exportar Excel</button>
 
       <div id="progresso" class="hidden w-full mt-2">
         <div class="flex justify-between text-xs text-slate-500 mb-1"><span id="progTxt">Consultando…</span><span id="progPct">0%</span></div>
@@ -96,10 +96,20 @@
     <section class="bg-white rounded-xl shadow-sm">
       <div class="p-4 flex flex-wrap gap-3 items-center border-b border-slate-100">
         <input id="busca" type="search" placeholder="Buscar NF, pedido, cliente, cidade, ocorrência…" class="flex-1 min-w-[240px] border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-        <label class="text-sm text-slate-600 flex items-center gap-2" title="Quais meses carregar na tela. A base guarda todo o histórico; nada é apagado.">Período
+        <label class="text-sm text-slate-600 flex items-center gap-2" title="Filtra pela data de emissão da NF (ou do CT-e, quando a NF ainda não tem XML). A base guarda todo o histórico; nada é apagado.">Emissão
           <select id="filtroPeriodo" class="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
-            <option value="1">Mês atual</option><option value="3">Últimos 3 meses</option><option value="6">Últimos 6 meses</option><option value="12">Últimos 12 meses</option><option value="0">Todo o histórico</option>
+            <option value="hoje">Hoje</option><option value="ontem">Ontem</option><option value="7d">Últimos 7 dias</option><option value="30d">Últimos 30 dias</option>
+            <option value="mes">Este mês</option><option value="mesant">Mês passado</option>
+            <option value="3m">Últimos 3 meses</option><option value="6m">Últimos 6 meses</option><option value="12m">Últimos 12 meses</option>
+            <option value="tudo">Todo o histórico</option><option value="custom">Escolher datas…</option>
           </select>
+        </label>
+        <span id="periodoCustom" class="hidden items-center gap-1 text-sm text-slate-600">
+          de <input type="date" id="periodoDe" class="border border-slate-300 rounded-lg px-2 py-1 text-sm">
+          até <input type="date" id="periodoAte" class="border border-slate-300 rounded-lg px-2 py-1 text-sm">
+        </span>
+        <label class="text-sm text-slate-600 flex items-center gap-2" title="Filiais da mesma empresa ficam juntas (mesma raiz de CNPJ)">Transportadora
+          <select id="filtroTransp" class="border border-slate-300 rounded-lg px-2 py-1.5 text-sm max-w-[240px]"><option value="">Todas</option></select>
         </label>
         <label class="text-sm text-slate-600 flex items-center gap-2">Parado há mais de
           <select id="filtroParado" class="border border-slate-300 rounded-lg px-2 py-1.5 text-sm">
@@ -351,6 +361,7 @@ const COL_BALDES = 'rastreio_baldes', COL_IMPORT = 'rastreio_importacoes', COL_C
 const BALDES_POR_MES = 100;
 // Nada é apagado (histórico para OTIF). O período só define o que cada navegador carrega na tela.
 const LS_PERIODO = 'rastreioSSW.v2.periodo';
+const LS_PERIODO2 = 'rastreioSSW.v2.periodoEmissao'; // { p: preset, de, ate }
 let mesesPeriodo = (() => { try { const v = localStorage.getItem(LS_PERIODO); return v === null ? 3 : Number(v); } catch { return 3; } })(); // 0 = tudo
 const IMPORTAR_A_PARTIR_DE = '2026-11-01'; // importação aceita só NFs emitidas a partir desta data
 const CAMPOS_SALVOS = ['emissaoCte', 'cnpjTranspNF', 'xmlEm', 'nf', 'chave', 'pedido', 'cliente', 'cidadeDestino', 'previsao', 'previsaoSSW', 'emissao', 'transportadora', 'valor',
@@ -374,6 +385,47 @@ function mesDoItem(it) {
   return (it.adicionadoEm || new Date().toISOString()).slice(0, 7).replace('-', '');
 }
 function baldeDoItem(it) { return it._balde || (it._balde = mesDoItem(it) + '-' + String(fnv(it.id) % BALDES_POR_MES).padStart(2, '0')); }
+// Período por data de emissão: atalhos ou datas escolhidas pelo usuário
+const diaLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+let periodo = (() => {
+  try { const v = JSON.parse(localStorage.getItem(LS_PERIODO2) || 'null'); if (v && v.p) return v; } catch {}
+  const antigo = { 1: 'mes', 3: '3m', 6: '6m', 12: '12m', 0: 'tudo' }[mesesPeriodo];
+  return { p: antigo || '3m', de: '', ate: '' };
+})();
+mesesPeriodo = mesesParaCobrir(intervaloPeriodo().de);
+function intervaloPeriodo(pr = periodo) {
+  const hoje = new Date(), d = (n) => { const x = new Date(hoje); x.setDate(x.getDate() - n); return diaLocal(x); };
+  const iniMes = (k) => diaLocal(new Date(hoje.getFullYear(), hoje.getMonth() - k, 1));
+  const fimMes = (k) => diaLocal(new Date(hoje.getFullYear(), hoje.getMonth() - k + 1, 0));
+  switch (pr.p) {
+    case 'hoje': return { de: d(0), ate: d(0) };
+    case 'ontem': return { de: d(1), ate: d(1) };
+    case '7d': return { de: d(6), ate: '' };
+    case '30d': return { de: d(29), ate: '' };
+    case 'mes': return { de: iniMes(0), ate: '' };
+    case 'mesant': return { de: iniMes(1), ate: fimMes(1) };
+    case '6m': return { de: iniMes(5), ate: '' };
+    case '12m': return { de: iniMes(11), ate: '' };
+    case 'tudo': return { de: '', ate: '' };
+    case 'custom': return { de: pr.de || '', ate: pr.ate || '' };
+    default: return { de: iniMes(2), ate: '' }; // 3m
+  }
+}
+// quantos meses precisam estar carregados para cobrir o "de" (0 = todos)
+function mesesParaCobrir(de) {
+  if (!de) return 0;
+  const h = new Date();
+  return Math.max(1, (h.getFullYear() - Number(de.slice(0, 4))) * 12 + (h.getMonth() + 1 - Number(de.slice(5, 7))) + 2); // +1 mês de folga
+}
+async function aplicarPeriodo(novo) {
+  periodo = novo;
+  try { localStorage.setItem(LS_PERIODO2, JSON.stringify(periodo)); } catch {}
+  document.getElementById('periodoCustom').classList.toggle('hidden', periodo.p !== 'custom');
+  document.getElementById('periodoCustom').classList.toggle('flex', periodo.p === 'custom');
+  const meses = mesesParaCobrir(intervaloPeriodo().de);
+  // carrega mais meses (do cache do navegador, sem custo no Firebase) só se o período pedir
+  if (meses !== mesesPeriodo) await mudarPeriodo(meses); else { pagina = 1; render(); }
+}
 function mesCorte() {
   if (!mesesPeriodo) return '000000';
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - (mesesPeriodo - 1));
@@ -600,7 +652,7 @@ function renderIntegradas() {
       </div></td>
       ${colunas(g)}
       <td class="px-3 py-2 text-right whitespace-nowrap">
-        <button class="text-blue-600 hover:underline text-xs mr-2" onclick="${pare}verNFsTransportadora('${varias ? g.raiz : g.filiais[0].cnpj_transp}')">Ver NFs</button>
+        <button class="text-blue-600 hover:underline text-xs mr-2" onclick="${pare}verNFsTransportadora('${g.raiz}')">Ver NFs</button>
         <button class="text-slate-500 hover:underline text-xs" onclick="${pare}renomearGrupo('${g.raiz}')" title="Mudar o nome desta transportadora">✎ renomear</button>
       </td>
     </tr>`;
@@ -623,7 +675,9 @@ function renderIntegradas() {
   document.getElementById('integAtualizado').textContent = 'Atualizado às ' + new Date(integradas.em).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
 function verNFsTransportadora(cnpj) {
-  document.getElementById('busca').value = cnpj;
+  const c = soDig(cnpj);
+  if (c.length === 8) { document.getElementById('busca').value = ''; atualizarOpcoesTransp(); document.getElementById('filtroTransp').value = 'R' + c; }
+  else { document.getElementById('filtroTransp').value = ''; document.getElementById('busca').value = cnpj; }
   pagina = 1; mudarAba('entregas'); render();
 }
 
@@ -1514,6 +1568,36 @@ function marcaVinculo(i) {
   if (w) return ' <span class="text-[10px] font-normal px-1 rounded bg-amber-100 text-amber-700" title="Chegou pela integração, mas o XML ainda não foi importado">sem XML</span>';
   return '';
 }
+// Transportadora da NF agrupada pela raiz do CNPJ (filiais juntas); sem CNPJ, pelo nome
+const limparNomeTransp = (n) => String(n || '').replace(/\s*\([^()]*\/[A-Z]{2}\)\s*$/i, '').replace(/\s+-\s+(unidade|filial)\b.*$/i, '').replace(/[\s.,-]+(LTDA|EIRELI|S\.?\s?A|ME|EPP)\.?$/i, '').trim();
+function grupoTransp(i) {
+  const raiz = soDig(i.cnpjTranspNF || i.cnpjTransp).slice(0, 8);
+  if (raiz.length === 8) return 'R' + raiz;
+  const n = norm(limparNomeTransp(i.transportadora || nomeTransportadora(i)));
+  return n ? 'N' + n : 'SEM';
+}
+let assinaturaTransp = '';
+function atualizarOpcoesTransp() {
+  const cont = new Map(), nomes = new Map();
+  for (const i of itens) {
+    const k = grupoTransp(i); cont.set(k, (cont.get(k) || 0) + 1);
+    if (!nomes.has(k)) nomes.set(k, new Map());
+    const n = limparNomeTransp(i.transportadora || nomeTransportadora(i)); if (n) nomes.get(k).set(n, (nomes.get(k).get(n) || 0) + 1);
+  }
+  const rotulo = (k) => {
+    if (k === 'SEM') return '(sem transportadora)';
+    if (k[0] === 'R' && nomesGrupo[k.slice(1)]) return nomesGrupo[k.slice(1)];
+    const m = nomes.get(k); if (!m || !m.size) return 'CNPJ ' + fmtRaiz(k.slice(1));
+    return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)[0][0];
+  };
+  const ops = [...cont.entries()].map(([k, q]) => [k, rotulo(k), q]).sort((a, b) => (a[0] === 'SEM') - (b[0] === 'SEM') || a[1].localeCompare(b[1], 'pt-BR'));
+  const assin = ops.map((o) => o.join('|')).join(';');
+  if (assin === assinaturaTransp) return;
+  assinaturaTransp = assin;
+  const sel = document.getElementById('filtroTransp'), atual = sel.value;
+  sel.innerHTML = '<option value="">Todas</option>' + ops.map(([k, r, q]) => `<option value="${esc(k)}">${esc(r)} (${q.toLocaleString('pt-BR')})</option>`).join('');
+  sel.value = ops.some((o) => o[0] === atual) ? atual : '';
+}
 let selecionadas = new Set(), idsFiltrados = [];  // NFs marcadas na tabela / NFs do filtro atual
 function render() {
   itens.forEach(calcularDerivados);
@@ -1544,7 +1628,12 @@ function render() {
   const soPend = document.getElementById('filtroPend').checked;
   const soAtraso = document.getElementById('filtroAtraso').checked;
   const vinc = document.getElementById('filtroVinculo').value;
+  atualizarOpcoesTransp();
+  const transp = document.getElementById('filtroTransp').value;
+  const per = intervaloPeriodo();
   let lista = itens.filter((i) => {
+    if (per.de || per.ate) { const dRef = (i.dataEmissao || i.primData || i.adicionadoEm || '').slice(0, 10); if (per.de && (!dRef || dRef < per.de)) return false; if (per.ate && dRef > per.ate) return false; }
+    if (transp && grupoTransp(i) !== transp) return false;
     if (filtroStatus) {
       const grupo = { ocorrencia: ['ocorrencia', 'devolucao'], nao_localizado: ['nao_localizado', 'erro'] }[filtroStatus] || [filtroStatus];
       if (!grupo.includes(i.status)) return false;
@@ -1571,6 +1660,7 @@ function render() {
   const ini = (pagina - 1) * POR_PAGINA;
   const totalFiltrado = lista.length;
   idsFiltrados = lista.map((i) => i.id);
+  window.__filtrados = lista.slice();
   lista = lista.slice(ini, ini + POR_PAGINA);
   document.getElementById('contagem').textContent = `${totalFiltrado} de ${itens.length}`;
   renderPaginacao(totalFiltrado, totalPaginas, ini);
@@ -1622,8 +1712,29 @@ document.getElementById('filtroParado').onchange = renderPag1;
 document.getElementById('filtroPend').onchange = renderPag1;
 document.getElementById('filtroAtraso').onchange = renderPag1;
 document.getElementById('filtroVinculo').onchange = renderPag1;
-document.getElementById('filtroPeriodo').value = String(mesesPeriodo);
-document.getElementById('filtroPeriodo').onchange = (e) => mudarPeriodo(Number(e.target.value));
+document.getElementById('filtroPeriodo').value = periodo.p;
+document.getElementById('periodoDe').value = periodo.de || '';
+document.getElementById('periodoAte').value = periodo.ate || '';
+document.getElementById('periodoCustom').classList.toggle('hidden', periodo.p !== 'custom');
+document.getElementById('periodoCustom').classList.toggle('flex', periodo.p === 'custom');
+document.getElementById('filtroPeriodo').onchange = (e) => {
+  const p = e.target.value;
+  if (p === 'custom') {
+    const atual = intervaloPeriodo(); // começa com as datas do atalho anterior
+    const de = document.getElementById('periodoDe').value || atual.de || diaLocal(new Date());
+    const ate = document.getElementById('periodoAte').value || atual.ate || diaLocal(new Date());
+    document.getElementById('periodoDe').value = de; document.getElementById('periodoAte').value = ate;
+    aplicarPeriodo({ p, de, ate });
+  } else aplicarPeriodo({ p, de: '', ate: '' });
+};
+const aoMudarDatas = () => {
+  let de = document.getElementById('periodoDe').value, ate = document.getElementById('periodoAte').value;
+  if (de && ate && de > ate) { [de, ate] = [ate, de]; document.getElementById('periodoDe').value = de; document.getElementById('periodoAte').value = ate; }
+  aplicarPeriodo({ p: 'custom', de, ate });
+};
+document.getElementById('periodoDe').onchange = aoMudarDatas;
+document.getElementById('periodoAte').onchange = aoMudarDatas;
+document.getElementById('filtroTransp').onchange = renderPag1;
 
 function renderPaginacao(total, totalPaginas, ini) {
   const el = document.getElementById('paginacao');
@@ -1761,8 +1872,9 @@ document.getElementById('btnAtualizarSel').onclick = async () => {
   await consultar(ids);
 };
 document.getElementById('btnExportar').onclick = () => {
-  if (!itens.length) return toast('Lista vazia.');
-  const linhas = itens.map((i) => ({
+  const base = window.__filtrados || itens; // exporta o que está filtrado na tela
+  if (!base.length) return toast('Nenhuma NF no filtro atual.');
+  const linhas = base.map((i) => ({
     'NF': i.nf, 'Pedido': i.pedido, 'Chave NF-e': i.chave, 'Cliente': i.cliente, 'Destino': i.cidadeDestino,
     'Status': (STATUS[i.status] || {}).label, 'Última pendência': i.ultPendencia || '', 'Descrição pendência': i.ultPendDescricao || '', 'Data última pendência': fmtData(i.ultPendData), 'Local pendência': i.ultPendLocal || '', 'Qtd. pendências': i.qtdPendencias || 0, 'Última ocorrência': i.ultOcorrencia || i.mensagem || '', 'Descrição': i.ultDescricao || '',
     'Data última ocorrência': fmtData(i.ultData), 'Local': i.ultLocal, 'Dias parado': i.diasParado ?? '', 'Dias em trânsito': i.diasTotal ?? '',
