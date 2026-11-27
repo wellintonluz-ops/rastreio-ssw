@@ -77,6 +77,10 @@
       <div class="w-px h-8 bg-slate-200 mx-1"></div>
       <button id="btnAtualizarPend" class="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 font-medium">⟳ Atualizar não entregues</button>
       <button id="btnAtualizarTodas" class="px-4 py-2 rounded-lg border border-emerald-600 text-emerald-700 hover:bg-emerald-50 font-medium">⟳ Atualizar todas</button>
+      <span id="barraSel" class="hidden items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-2 py-1">
+        <button id="btnAtualizarSel" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-medium"></button>
+        <button id="btnLimparSel" class="text-xs text-blue-700 hover:underline px-1">limpar seleção</button>
+      </span>
       <button id="btnExportar" class="px-4 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 font-medium">⬇ Exportar Excel</button>
 
       <div id="progresso" class="hidden w-full mt-2">
@@ -114,10 +118,11 @@
       <div>
         <table class="w-full text-sm table-fixed">
           <colgroup>
-            <col style="width:8%"><col style="width:7%"><col style="width:14%"><col style="width:10%"><col style="width:18%"><col style="width:22%"><col style="width:8%"><col style="width:8%"><col style="width:5%">
+            <col style="width:3%"><col style="width:8%"><col style="width:7%"><col style="width:13%"><col style="width:10%"><col style="width:17%"><col style="width:21%"><col style="width:8%"><col style="width:8%"><col style="width:5%">
           </colgroup>
           <thead class="bg-slate-50 text-slate-500 text-[11px] uppercase tracking-wide">
             <tr>
+              <th class="px-2 py-2 text-center"><input type="checkbox" id="selTodas" class="w-4 h-4 cursor-pointer" title="Selecionar todas as NFs do filtro atual (todas as páginas)"></th>
               <th class="text-left px-2 py-2 sortable" data-sort="nf">NF / Pedido</th>
               <th class="text-left px-2 py-2 sortable" data-sort="dataEmissao" title="Data de emissão da NF (XML). Sem XML, mostra a emissão do CT-e (ocorrência 80); ao importar o XML passa a ser a da NF.">Emissão</th>
               <th class="text-left px-2 py-2 sortable" data-sort="cliente">Cliente / Destino</th>
@@ -1509,6 +1514,7 @@ function marcaVinculo(i) {
   if (w) return ' <span class="text-[10px] font-normal px-1 rounded bg-amber-100 text-amber-700" title="Chegou pela integração, mas o XML ainda não foi importado">sem XML</span>';
   return '';
 }
+let selecionadas = new Set(), idsFiltrados = [];  // NFs marcadas na tabela / NFs do filtro atual
 function render() {
   itens.forEach(calcularDerivados);
   // KPIs
@@ -1564,14 +1570,17 @@ function render() {
   if (pagina < 1) pagina = 1;
   const ini = (pagina - 1) * POR_PAGINA;
   const totalFiltrado = lista.length;
+  idsFiltrados = lista.map((i) => i.id);
   lista = lista.slice(ini, ini + POR_PAGINA);
   document.getElementById('contagem').textContent = `${totalFiltrado} de ${itens.length}`;
   renderPaginacao(totalFiltrado, totalPaginas, ini);
+  atualizarBarraSel();
   document.getElementById('vazio').classList.toggle('hidden', itens.length > 0);
   document.getElementById('tbody').innerHTML = lista.map((i) => {
     const alerta = i.diasParado != null && i.diasParado >= 3 ? 'text-red-600 font-semibold' : '';
     const pendAtual = ['ocorrencia', 'devolucao'].includes(i.status);
-    return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer align-top" data-id="${i.id}">
+    return `<tr class="border-t border-slate-100 hover:bg-slate-50 cursor-pointer align-top ${selecionadas.has(i.id) ? 'bg-blue-50/60' : ''}" data-id="${i.id}">
+      <td class="px-2 py-2 text-center" data-acao="sel"><input type="checkbox" data-acao="sel" class="w-4 h-4 cursor-pointer" ${selecionadas.has(i.id) ? 'checked' : ''}></td>
       <td class="px-2 py-2"><div class="font-semibold">${esc(i.nf || '—')}${marcaVinculo(i)}</div><div class="text-[11px] text-slate-400 truncate" title="Pedido ${esc(i.pedido)}">${esc(i.pedido)}</div></td>
       <td class="px-2 py-2">${celulaEmissao(i)}</td>
       <td class="px-2 py-2"><div class="truncate" title="${esc(i.cliente)}">${esc(i.cliente)}</div><div class="text-[11px] text-slate-400 truncate">${esc(i.cidadeDestino)}</div></td>
@@ -1596,6 +1605,7 @@ document.getElementById('tbody').onclick = (ev) => {
   const tr = ev.target.closest('tr[data-id]'); if (!tr) return;
   const id = tr.dataset.id;
   const acao = ev.target.dataset.acao;
+  if (acao === 'sel') { if (selecionadas.has(id)) selecionadas.delete(id); else selecionadas.add(id); render(); return; }
   if (acao === 'remover') { const it = itensPorId.get(id); if (it && confirm(`Remover a NF ${it.nf || it.id} da base? Ela some para todos.`)) removerItem(id); return; }
   if (acao === 'atualizar') { consultar([id]); return; }
   abrirDetalhe(id);
@@ -1725,6 +1735,31 @@ document.getElementById('btnConfirmarAdd').onclick = () => {
 };
 document.getElementById('btnAtualizarPend').onclick = () => consultar(itens.filter((i) => i.status !== 'entregue').map((i) => i.id));
 document.getElementById('btnAtualizarTodas').onclick = () => consultar(itens.map((i) => i.id));
+// Seleção: marque NFs (ou todas do filtro pelo cabeçalho) e atualize só elas
+function atualizarBarraSel() {
+  for (const id of [...selecionadas]) if (!itensPorId.has(id)) selecionadas.delete(id);
+  const n = selecionadas.size, barra = document.getElementById('barraSel');
+  barra.classList.toggle('hidden', !n); barra.classList.toggle('flex', !!n);
+  document.getElementById('btnAtualizarSel').textContent = `⟳ Atualizar selecionadas (${n.toLocaleString('pt-BR')})`;
+  const cab = document.getElementById('selTodas');
+  const marcadasNoFiltro = idsFiltrados.filter((id) => selecionadas.has(id)).length;
+  cab.checked = idsFiltrados.length > 0 && marcadasNoFiltro === idsFiltrados.length;
+  cab.indeterminate = marcadasNoFiltro > 0 && marcadasNoFiltro < idsFiltrados.length;
+  cab.title = `Selecionar as ${idsFiltrados.length.toLocaleString('pt-BR')} NFs do filtro atual (todas as páginas)`;
+}
+document.getElementById('selTodas').onclick = (ev) => {
+  ev.stopPropagation();
+  const todas = idsFiltrados.length && idsFiltrados.every((id) => selecionadas.has(id));
+  if (todas) idsFiltrados.forEach((id) => selecionadas.delete(id)); else idsFiltrados.forEach((id) => selecionadas.add(id));
+  render();
+};
+document.getElementById('btnLimparSel').onclick = () => { selecionadas.clear(); render(); };
+document.getElementById('btnAtualizarSel').onclick = async () => {
+  const ids = [...selecionadas].filter((id) => itensPorId.has(id));
+  if (!ids.length) return;
+  selecionadas.clear(); render();
+  await consultar(ids);
+};
 document.getElementById('btnExportar').onclick = () => {
   if (!itens.length) return toast('Lista vazia.');
   const linhas = itens.map((i) => ({
