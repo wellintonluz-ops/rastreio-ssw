@@ -173,7 +173,7 @@ async function rastrearItem(it, env) {
   // 1) Chave da NF-e — API pública
   if (chave.length === 44) {
     const r = await chamarSSW('trackingdanfe', { chave_nfe: chave });
-    tentativas.push({ api: 'trackingdanfe', status: r.status, mensagem: r.json.message });
+    tentativas.push({ api: 'trackingdanfe', status: r.status, mensagem: r.json.message, temporario: !!r.json.temporario });
     if (r.json.success) return { id: it.id, ok: true, fonte: 'trackingdanfe', resposta: r.json, tentativas };
   }
 
@@ -194,7 +194,7 @@ async function rastrearItem(it, env) {
       tentativas.push({ api: 'tracking', status: r.status, mensagem: r.json.message });
       r = r2;
     }
-    tentativas.push({ api: 'tracking', status: r.status, mensagem: r.json.message });
+    tentativas.push({ api: 'tracking', status: r.status, mensagem: r.json.message, temporario: !!r.json.temporario });
     if (r.json.success) return { id: it.id, ok: true, fonte: 'tracking', resposta: r.json, tentativas };
   }
 
@@ -205,30 +205,41 @@ async function rastrearItem(it, env) {
     else if (nf) body.nro_nf = Number(nf);
     else if (pedido) body.pedido = pedido;
     const r = await chamarSSW('trackingpf', body);
-    tentativas.push({ api: 'trackingpf', status: r.status, mensagem: r.json.message });
+    tentativas.push({ api: 'trackingpf', status: r.status, mensagem: r.json.message, temporario: !!r.json.temporario });
     if (r.json.success) return { id: it.id, ok: true, fonte: 'trackingpf', resposta: r.json, tentativas };
   }
 
   if (!tentativas.length) {
     return { id: it.id, ok: false, mensagem: 'Sem dados suficientes: informe a chave da NF-e, ou configure o CNPJ do remetente, ou informe o CPF do destinatário.', tentativas };
   }
-  return { id: it.id, ok: false, mensagem: tentativas[tentativas.length - 1].mensagem || 'Não localizado', tentativas };
+  // resposta definitiva (ex.: "Nenhum documento localizado") vale mais que falha passageira da SSW
+  const definitiva = tentativas.filter((t) => !t.temporario);
+  if (definitiva.length) return { id: it.id, ok: false, mensagem: definitiva[definitiva.length - 1].mensagem || 'Não localizado', tentativas };
+  return { id: it.id, ok: false, temporario: true, mensagem: tentativas[tentativas.length - 1].mensagem || 'SSW fora do ar no momento', tentativas };
 }
 
+// Chama a WebAPI da SSW. Se a SSW responder com página de erro (HTML), erro 5xx/429 ou cair a conexão,
+// é falha passageira: tenta de novo até 2 vezes. Se continuar, marca temporario: true (não é "não localizado").
 async function chamarSSW(rota, body) {
-  try {
-    const r = await fetch(SSW + rota, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const txt = await r.text();
-    let j;
-    try { j = JSON.parse(txt); } catch { j = { success: false, message: 'Resposta inesperada da SSW: ' + txt.slice(0, 200) }; }
-    return { status: r.status, json: limparDocumentos(j) };
-  } catch (e) {
-    return { status: 0, json: { success: false, message: 'Falha ao acessar SSW: ' + e.message } };
+  let ultimo = null;
+  for (let tentativa = 0; tentativa < 3; tentativa++) {
+    if (tentativa) await new Promise((res) => setTimeout(res, tentativa * 1200));
+    try {
+      const r = await fetch(SSW + rota, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const txt = await r.text();
+      let j = null;
+      try { j = JSON.parse(txt); } catch { /* HTML ou vazio */ }
+      if (j && typeof j === 'object' && r.status < 500 && r.status !== 429) return { status: r.status, json: limparDocumentos(j) };
+      ultimo = { status: r.status, json: { success: false, temporario: true, message: `SSW fora do ar no momento (HTTP ${r.status}${j ? '' : ', resposta não era JSON'}). Consulte de novo em alguns minutos.` } };
+    } catch (e) {
+      ultimo = { status: 0, json: { success: false, temporario: true, message: 'Falha ao acessar a SSW: ' + e.message } };
+    }
   }
+  return ultimo;
 }
 
 // LGPD: tira CPF/CNPJ/RG de pessoas (recebedor, destinatário) da resposta antes de ir ao navegador

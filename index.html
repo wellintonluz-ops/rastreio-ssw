@@ -1144,7 +1144,7 @@ async function consultar(ids) {
   if (!alvo.length) { toast('Nada para consultar.'); return; }
   consultando = true; adiarGravacao = true;
   const prog = document.getElementById('progresso'); prog.classList.remove('hidden');
-  let feitos = 0, erroGeral = null, parar = false, ultimoFlush = Date.now();
+  let feitos = 0, total = alvo.length, erroGeral = null, parar = false, ultimoFlush = Date.now();
   atualizarProgresso(0, alvo.length);
   const lotes = [];
   for (let i = 0; i < alvo.length; i += LOTE) lotes.push(alvo.slice(i, i + LOTE));
@@ -1164,7 +1164,7 @@ async function consultar(ids) {
         if (/login|sess|token|restrito/i.test(e.message)) parar = true;
       }
       feitos += lote.length;
-      atualizarProgresso(feitos, alvo.length);
+      atualizarProgresso(feitos, total);
       if (Date.now() - ultimoRender > 1500) { ultimoRender = Date.now(); render(); }
       // grava o que já foi consultado a cada ~90 s (poucas gravações, nada se perde se a página fechar)
       if (Date.now() - ultimoFlush > 90000 && !gravando) { ultimoFlush = Date.now(); await gravarAlteracoes(); }
@@ -1172,6 +1172,15 @@ async function consultar(ids) {
   };
   try {
     await Promise.all([trabalhador(), trabalhador(), trabalhador()]); // 3 lotes de 12 por vez
+    // 2ª passada: as que deram erro passageiro da SSW, um lote por vez e com pausa
+    const deNovo = alvo.filter((i) => i.status === 'erro');
+    if (deNovo.length && !parar) {
+      await new Promise((res) => setTimeout(res, 5000));
+      lotes.length = 0; prox = 0; feitos = 0; total = deNovo.length;
+      for (let i = 0; i < deNovo.length; i += LOTE) lotes.push(deNovo.slice(i, i + LOTE));
+      document.getElementById('progTxt').textContent = `Consultando de novo ${deNovo.length} NF(s) em que a SSW falhou…`;
+      await trabalhador();
+    }
   } finally {
     consultando = false; adiarGravacao = false;
     render();
@@ -1199,6 +1208,11 @@ function aplicarResultado(r) {
   it.fonte = r.fonte || '';
   it.tentativas = r.tentativas || [];
   if (!r.ok) {
+    const passageira = r.temporario || /fora do ar|inesperada|falha ao acessar|<html/i.test(r.mensagem || '');
+    if (passageira && anterior.status && !['pendente', 'erro'].includes(anterior.status)) {
+      it.consultadoEm = anterior.consultadoEm; it.fonte = anterior.fonte; it.tentativas = anterior.tentativas; // mantém o que já se sabia
+      return;
+    }
     it.erroApi = r.mensagem || 'Não localizado';
     recalcular(it); preservarMaisRecente(it, anterior);
     return;
